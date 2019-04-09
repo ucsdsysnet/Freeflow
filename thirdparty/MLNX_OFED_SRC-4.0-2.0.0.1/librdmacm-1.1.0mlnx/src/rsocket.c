@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2008-2014 Intel Corporation.  All rights reserved.
+ * Copyright (c) Microsoft Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -49,10 +50,15 @@
 #include <netinet/tcp.h>
 #include <sys/epoll.h>
 #include <search.h>
+#include <sys/shm.h>
+#include <sys/mman.h>
+#include <time.h>
+#include <unistd.h>
 
 #include <rdma/rdma_cma.h>
 #include <rdma/rdma_verbs.h>
 #include <rdma/rsocket.h>
+#include <rdma/freeflow.h>
 #include "cma.h"
 #include "indexer.h"
 
@@ -109,7 +115,7 @@ static struct rs_svc tcp_svc = {
 };
 
 static uint16_t def_iomap_size = 0;
-static uint16_t def_inline = 64;
+static uint16_t def_inline = 0;
 static uint16_t def_sqsize = 384;
 static uint16_t def_rqsize = 384;
 static uint32_t def_mem = (1 << 17);
@@ -582,7 +588,7 @@ static struct rsocket *rs_alloc(struct rsocket *inherited_rs, int type)
 	if (inherited_rs) {
 		rs->sbuf_size = inherited_rs->sbuf_size;
 		rs->rbuf_size = inherited_rs->rbuf_size;
-		rs->sq_inline = inherited_rs->sq_inline;
+		rs->sq_inline = 0;//inherited_rs->sq_inline;
 		rs->sq_size = inherited_rs->sq_size;
 		rs->rq_size = inherited_rs->rq_size;
 		if (type == SOCK_STREAM) {
@@ -685,25 +691,31 @@ static int rs_init_bufs(struct rsocket *rs)
 		return ERR(ENOMEM);
 
 	total_sbuf_size = rs->sbuf_size;
-	if (rs->sq_inline < RS_MAX_CTRL_MSG)
+	/*if (rs->sq_inline < RS_MAX_CTRL_MSG)
+	{
 		total_sbuf_size += RS_MAX_CTRL_MSG * RS_QP_CTRL_SIZE;
-	rs->sbuf = calloc(total_sbuf_size, 1);
-	if (!rs->sbuf)
-		return ERR(ENOMEM);
+	}*/
 
-	rs->smr = rdma_reg_msgs(rs->cm_id, rs->sbuf, total_sbuf_size);
+	total_sbuf_size += RS_MAX_CTRL_MSG * RS_QP_CTRL_SIZE;
+	rs->sbuf = NULL; //calloc(total_sbuf_size, 1);
+	//if (!rs->sbuf)
+	//	return ERR(ENOMEM);
+
+	//rs->smr = rdma_reg_msgs(rs->cm_id, rs->sbuf, total_sbuf_size);
+	rs->smr = rdma_reg_msgs_ff(rs->cm_id, &rs->sbuf, total_sbuf_size);
 	if (!rs->smr)
 		return -1;
 
 	len = sizeof(*rs->target_sgl) * RS_SGL_SIZE +
 	      sizeof(*rs->target_iomap) * rs->target_iomap_size;
-	rs->target_buffer_list = malloc(len);
-	if (!rs->target_buffer_list)
-		return ERR(ENOMEM);
+	rs->target_buffer_list = NULL;//malloc(len);
+	//if (!rs->target_buffer_list)
+	//	return ERR(ENOMEM);
 
-	rs->target_mr = rdma_reg_write(rs->cm_id, rs->target_buffer_list, len);
-	if (!rs->target_mr)
-		return -1;
+	//rs->target_mr = rdma_reg_write(rs->cm_id, rs->target_buffer_list, len);
+	rs->target_mr = rdma_reg_write_ff(rs->cm_id, &rs->target_buffer_list, len);
+	//if (!rs->target_mr)
+	//	return -1;
 
 	memset(rs->target_buffer_list, 0, len);
 	rs->target_sgl = rs->target_buffer_list;
@@ -711,13 +723,18 @@ static int rs_init_bufs(struct rsocket *rs)
 		rs->target_iomap = (struct rs_iomap *) (rs->target_sgl + RS_SGL_SIZE);
 
 	total_rbuf_size = rs->rbuf_size;
-	if (rs->opts & RS_OPT_MSG_SEND)
+	/*if (rs->opts & RS_OPT_MSG_SEND)
+	{
 		total_rbuf_size += rs->rq_size * RS_MSG_SIZE;
-	rs->rbuf = calloc(total_rbuf_size, 1);
-	if (!rs->rbuf)
-		return ERR(ENOMEM);
+	}*/
 
-	rs->rmr = rdma_reg_write(rs->cm_id, rs->rbuf, total_rbuf_size);
+	total_rbuf_size += rs->rq_size * RS_MSG_SIZE;
+	rs->rbuf = NULL;//calloc(total_rbuf_size, 1);
+	//if (!rs->rbuf)
+	//	return ERR(ENOMEM);
+
+	//rs->rmr = rdma_reg_write(rs->cm_id, rs->rbuf, total_rbuf_size);
+	rs->rmr = rdma_reg_write_ff(rs->cm_id, &rs->rbuf, total_rbuf_size);
 	if (!rs->rmr)
 		return -1;
 
@@ -729,11 +746,16 @@ static int rs_init_bufs(struct rsocket *rs)
 	rs->rbuf_bytes_avail = rs->rbuf_size >> 1;
 	rs->sqe_avail = rs->sq_size - rs->ctrl_max_seqno;
 	rs->rseq_comp = rs->rq_size >> 1;
+
+	sleep(1.0);
+
 	return 0;
 }
 
 static int ds_init_bufs(struct ds_qp *qp)
 {
+	printf("+++++++++++++++++++++++++++\n");
+	fflush(stdout);
 	qp->rbuf = calloc(qp->rs->rbuf_size + sizeof(struct ibv_grh), 1);
 	if (!qp->rbuf)
 		return ERR(ENOMEM);
@@ -859,7 +881,8 @@ static int rs_create_ep(struct rsocket *rs)
 	if (ret)
 		return ret;
 
-	rs->sq_inline = qp_attr.cap.max_inline_data;
+	//rs->sq_inline = qp_attr.cap.max_inline_data;
+	rs->sq_inline = 0;
 	if ((rs->opts & RS_OPT_MSG_SEND) && (rs->sq_inline < RS_MSG_SIZE))
 		return ERR(ENOTSUP);
 
@@ -963,6 +986,7 @@ static void ds_free(struct rsocket *rs)
 
 static void rs_free(struct rsocket *rs)
 {
+	char shm_name[100];
 	if (rs->type == SOCK_DGRAM) {
 		ds_free(rs);
 		return;
@@ -971,23 +995,39 @@ static void rs_free(struct rsocket *rs)
 	if (rs->rmsg)
 		free(rs->rmsg);
 
-	if (rs->sbuf) {
 		if (rs->smr)
+		{
+			strcpy(shm_name, rs->smr->shm_name);
 			rdma_dereg_mr(rs->smr);
-		free(rs->sbuf);
-	}
+			/*if (rs->sbuf != MAP_FAILED)
+			{
+                		if (shm_unlink(shm_name) == -1)
+                        		printf("Error removing shared memory %s.", shm_name);
+			}*/
+		}
 
-	if (rs->rbuf) {
 		if (rs->rmr)
+		{
+			strcpy(shm_name, rs->rmr->shm_name);
 			rdma_dereg_mr(rs->rmr);
-		free(rs->rbuf);
-	}
+			/*if (rs->rbuf != MAP_FAILED)
+			{
+                		if (shm_unlink(shm_name) == -1)
+                        		printf("Error removing shared memory %s.", shm_name);
+			}*/
+		}
 
-	if (rs->target_buffer_list) {
 		if (rs->target_mr)
+		{
+			strcpy(shm_name, rs->target_mr->shm_name);
+			// [TODO] segment fault at here.
 			rdma_dereg_mr(rs->target_mr);
-		free(rs->target_buffer_list);
-	}
+			/*if (rs->target_buffer_list != MAP_FAILED)
+			{
+                		if (shm_unlink(shm_name) == -1)
+                        		printf("Error removing shared memory %s.", shm_name);
+			}*/
+		}
 
 	if (rs->cm_id) {
 		rs_free_iomappings(rs);
@@ -1171,6 +1211,12 @@ int rbind(int socket, const struct sockaddr *addr, socklen_t addrlen)
 
 int rlisten(int socket, int backlog)
 {
+	if (PRINT_LOG)
+	{
+		printf("### rlisten ###\n");
+		fflush(stdout);
+	}
+
 	struct rsocket *rs;
 	int ret;
 
@@ -1185,6 +1231,14 @@ int rlisten(int socket, int backlog)
 	} else {
 		ret = 0;
 	}
+
+	if (PRINT_LOG)
+	{
+		printf("### end of rlisten ret --> %d ###\n", ret);
+		fflush(stdout);
+	}
+
+
 	return ret;
 }
 
@@ -1202,6 +1256,12 @@ int rlisten(int socket, int backlog)
  */
 int raccept(int socket, struct sockaddr *addr, socklen_t *addrlen)
 {
+	if (PRINT_LOG)
+	{
+		printf("### raccept ###\n");
+		fflush(stdout);
+	}
+
 	struct rsocket *rs, *new_rs;
 	struct rdma_conn_param param;
 	struct rs_conn_data *creq, cresp;
@@ -1251,10 +1311,12 @@ int raccept(int socket, struct sockaddr *addr, socklen_t *addrlen)
 
 	if (addr && addrlen)
 		rgetpeername(new_rs->index, addr, addrlen);
+
 	return new_rs->index;
 
 err:
 	rs_free(new_rs);
+
 	return ret;
 }
 
@@ -1815,7 +1877,8 @@ static void rs_send_credits(struct rsocket *rs)
 			sge.length = bswap_32(rs->rbuf_size >> 1);
 		}
 
-		if (rs->sq_inline < sizeof sge) {
+		//if (rs->sq_inline < sizeof sge) {
+		if (1) {
 			sge_buf = rs_get_ctrl_buf(rs);
 			memcpy(sge_buf, &sge, sizeof sge);
 			ibsge.addr = (uintptr_t) sge_buf;
@@ -1885,6 +1948,22 @@ static int rs_poll_cq(struct rsocket *rs)
 			if (wc.status != IBV_WC_SUCCESS)
 				continue;
 			rcnt++;
+
+			/*printf("============================\n");
+			printf("wc.wr_id=%d\n", wc.wr_id);
+			printf("wc.status=%d\n", wc.status);
+			printf("wc.opcode=%d\n", wc.opcode);
+			printf("wc.vendor_err=%d\n", wc.vendor_err);
+			printf("wc.byte_len=%d\n", wc.byte_len);
+			printf("wc.imm_data=%d, %d\n", wc.imm_data, wc.wc_flags & IBV_WC_WITH_IMM);
+			printf("wc.qp_num=%d\n", wc.qp_num);
+			printf("wc.src_qp=%d\n", wc.src_qp);
+			printf("wc.wc_flags=%d\n", wc.wc_flags);
+			printf("wc.pkey_index=%d\n", wc.pkey_index);
+			printf("wc.slid=%d\n", wc.slid);
+			printf("wc.sl=%d\n", wc.sl);
+			printf("wc.dlid_path_bits=%d\n", wc.dlid_path_bits);
+			fflush(stdout);*/
 
 			if (wc.wc_flags & IBV_WC_WITH_IMM) {
 				msg = ntohl(wc.imm_data);
@@ -2036,6 +2115,7 @@ static int rs_process_cq(struct rsocket *rs, int nonblock, int (*test)(struct rs
 static int rs_get_comp(struct rsocket *rs, int nonblock, int (*test)(struct rsocket *rs))
 {
 	struct timeval s, e;
+
 	uint32_t poll_time = 0;
 	int ret;
 
@@ -2055,6 +2135,30 @@ static int rs_get_comp(struct rsocket *rs, int nonblock, int (*test)(struct rsoc
 	ret = rs_process_cq(rs, 0, test);
 	return ret;
 }
+
+/*static int rs_get_comp(struct rsocket *rs, int nonblock, int (*test)(struct rsocket *rs))
+{
+	struct timespec s, e;
+
+	uint32_t poll_time = 0;
+	int ret;
+
+	do {
+		ret = rs_process_cq(rs, 1, test);
+		if (!ret || nonblock || errno != EWOULDBLOCK)
+			return ret;
+
+		if (!poll_time)
+			clock_gettime(CLOCK_REALTIME, &s);
+
+		clock_gettime(CLOCK_REALTIME, &e);
+		poll_time = (e.tv_sec - s.tv_sec) * 1000000 +
+			    (e.tv_nsec - s.tv_nsec) / 1000 + 1;
+	} while (poll_time <= polling_time);
+
+	ret = rs_process_cq(rs, 0, test);
+	return ret;
+}*/
 
 static int ds_valid_recv(struct ds_qp *qp, struct ibv_wc *wc)
 {
@@ -2715,12 +2819,13 @@ ssize_t rsend(int socket, const void *buf, size_t len, int flags)
 		if (xfer_size > rs->target_sgl[rs->target_sge].length)
 			xfer_size = rs->target_sgl[rs->target_sge].length;
 
-		if (xfer_size <= rs->sq_inline) {
+		/*if (xfer_size <= rs->sq_inline) {
 			sge.addr = (uintptr_t) buf;
 			sge.length = xfer_size;
 			sge.lkey = 0;
 			ret = rs_write_data(rs, &sge, 1, xfer_size, IBV_SEND_INLINE);
-		} else if (xfer_size <= rs_sbuf_left(rs)) {
+		} else if (xfer_size <= rs_sbuf_left(rs)) {*/
+		if (xfer_size <= rs_sbuf_left(rs)) {
 			memcpy((void *) (uintptr_t) rs->ssgl[0].addr, buf, xfer_size);
 			rs->ssgl[0].length = xfer_size;
 			ret = rs_write_data(rs, rs->ssgl, 1, xfer_size, 0);
@@ -3170,6 +3275,12 @@ static int rs_convert_timeout(struct timeval *timeout)
 int rselect(int nfds, fd_set *readfds, fd_set *writefds,
 	    fd_set *exceptfds, struct timeval *timeout)
 {
+	if (PRINT_LOG)
+	{
+		printf("### rselect ###\n");
+		fflush(stdout);
+	}
+
 	struct pollfd *fds;
 	int ret;
 
@@ -3391,12 +3502,17 @@ int rsetsockopt(int socket, int level, int optname,
 					ret = 0;
 			}
 			opt_on = *(int *) optval;
+			printf("SO_REUSEADDR\n");
+			fflush(stdout);
 			break;
 		case SO_RCVBUF:
 			if ((rs->type == SOCK_STREAM && !rs->rbuf) ||
 			    (rs->type == SOCK_DGRAM && !rs->qp_list))
 				rs->rbuf_size = (*(uint32_t *) optval) << 1;
 			ret = 0;
+			printf("SO_RCVBUG\n");
+			fflush(stdout);
+
 			break;
 		case SO_SNDBUF:
 			if (!rs->sbuf)
@@ -3404,25 +3520,45 @@ int rsetsockopt(int socket, int level, int optname,
 			if (rs->sbuf_size < RS_SNDLOWAT)
 				rs->sbuf_size = RS_SNDLOWAT << 1;
 			ret = 0;
+			printf("SO_SNDBUF\n");
+			fflush(stdout);
+
 			break;
 		case SO_LINGER:
 			/* Invert value so default so_opt = 0 is on */
 			opt_on =  !((struct linger *) optval)->l_onoff;
 			ret = 0;
+			printf("SO_LINGER\n");
+			fflush(stdout);
+
 			break;
 		case SO_KEEPALIVE:
 			ret = rs_set_keepalive(rs, *(int *) optval);
 			opt_on = rs->opts & RS_OPT_SVC_ACTIVE;
+			printf("SO_KEEPALIVE\n");
+			fflush(stdout);
+
 			break;
 		case SO_OOBINLINE:
 			opt_on = *(int *) optval;
 			ret = 0;
+			printf("SO_OOBINLINE\n");
+			fflush(stdout);
+
 			break;
+
 		default:
+			printf("SO_OTHERS\n");
+			fflush(stdout);
+
 			break;
 		}
 		break;
 	case IPPROTO_TCP:
+			printf("IPPROTO_TCP\n");
+			fflush(stdout);
+
+
 		opts = &rs->tcp_opts;
 		switch (optname) {
 		case TCP_KEEPCNT:
@@ -3450,6 +3586,10 @@ int rsetsockopt(int socket, int level, int optname,
 		}
 		break;
 	case IPPROTO_IPV6:
+			printf("IPPROTO_IPV6\n");
+			fflush(stdout);
+
+
 		opts = &rs->ipv6_opts;
 		switch (optname) {
 		case IPV6_V6ONLY:
@@ -3480,7 +3620,7 @@ int rsetsockopt(int socket, int level, int optname,
 			ret = 0;
 			break;
 		case RDMA_INLINE:
-			rs->sq_inline = min(*(uint32_t *) optval, RS_QP_MAX_SIZE);
+			rs->sq_inline = 0; //min(*(uint32_t *) optval, RS_QP_MAX_SIZE);
 			ret = 0;
 			break;
 		case RDMA_IOMAPSIZE:
@@ -3763,6 +3903,9 @@ off_t riomap(int socket, void *buf, size_t len, int prot, int flags, off_t offse
 	}
 
 	iomr->mr = ibv_reg_mr(rs->cm_id->pd, buf, len, access);
+	//char shm_name[100];
+	//sprintf(shm_name, "shm_name_%d", (uintptr_t)(*buf));
+	//iomr->mr = ibv_reg_mr_ff(rs->cm_id->pd, buf, len, access, shm_name);
 	if (!iomr->mr) {
 		if (iomr->index < 0)
 			free(iomr);

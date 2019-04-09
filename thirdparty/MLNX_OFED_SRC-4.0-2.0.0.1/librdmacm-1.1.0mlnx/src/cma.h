@@ -179,9 +179,9 @@ struct ib_connect_hdr {
 #define cma_dst_ip6 dst_addr[0]
 };
 
-#ifndef SYSCONFDIR
+//#ifndef SYSCONFDIR
 #define SYSCONFDIR "/etc"
-#endif
+//#endif
 #ifndef RDMADIR
 #define RDMADIR "rdma"
 #endif

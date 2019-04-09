@@ -885,6 +885,9 @@ static struct pollfd *fds_alloc(nfds_t nfds)
 
 int poll(struct pollfd *fds, nfds_t nfds, int timeout)
 {
+	printf("### poll ###\n");
+	fflush(stdout);
+
 	struct pollfd *rfds;
 	int i, ret;
 
@@ -972,6 +975,9 @@ static int rs_convert_timeout(struct timeval *timeout)
 int select(int nfds, fd_set *readfds, fd_set *writefds,
 	   fd_set *exceptfds, struct timeval *timeout)
 {
+
+	printf("### select ###\n");
+	fflush(stdout);
 	struct pollfd *fds;
 	int ret;
 
@@ -981,6 +987,29 @@ int select(int nfds, fd_set *readfds, fd_set *writefds,
 
 	select_to_rpoll(fds, &nfds, readfds, writefds, exceptfds);
 	ret = rpoll(fds, nfds, rs_convert_timeout(timeout));
+
+	/*int i, fd, rfd, cnt;
+	fd_set read_temp, write_temp, except_temp;
+
+	for (i = 0, fd = 0; i < nfds; fd++) {
+		rfd = fd_getd(fd);
+		if (rfd != fds[i].fd)
+			continue;
+
+		if (FD_ISSET(fd, readfds))
+			cnt++;
+
+		if (FD_ISSET(fd, writefds))
+			cnt++;
+
+		if (FD_ISSET(fd, exceptfds))
+			cnt++;
+		i++;
+	}
+
+	memcpy(&read_temp, readfds, sizeof(fd_set));
+	memcpy(&write_temp, writefds, sizeof(fd_set));
+	//memcpy(&except_temp, exceptfds, sizeof(fd_set));*/
 
 	if (readfds)
 		FD_ZERO(readfds);
@@ -992,6 +1021,24 @@ int select(int nfds, fd_set *readfds, fd_set *writefds,
 	if (ret > 0)
 		ret = rpoll_to_select(fds, nfds, readfds, writefds, exceptfds);
 
+	/*for (i = 0, fd = 0; i < nfds; fd++) {
+		rfd = fd_getd(fd);
+		if (rfd != fds[i].fd)
+			continue;
+
+		if (FD_ISSET(fd, &read_temp))
+			FD_SET(fd, readfds);
+
+		if (FD_ISSET(fd, &write_temp))
+			FD_SET(fd, writefds);
+
+		if (FD_ISSET(fd, &except_temp))
+			FD_SET(fd, exceptfds);
+
+		i++;
+	}
+
+	return ret + cnt;*/
 	return ret;
 }
 

@@ -49,7 +49,7 @@
 #include <rdma/rdma_cma.h>
 #include <infiniband/arch.h>
 
-static int debug = 0;
+static int debug = 1;
 #define DEBUG_LOG if (debug) printf
 
 /*
@@ -126,12 +126,12 @@ struct rping_cb {
 
 	struct ibv_recv_wr rq_wr;	/* recv work request record */
 	struct ibv_sge recv_sgl;	/* recv single SGE */
-	struct rping_rdma_info recv_buf;/* malloc'd buffer */
+	struct rping_rdma_info *recv_buf;/* malloc'd buffer */
 	struct ibv_mr *recv_mr;		/* MR associated with this buffer */
 
 	struct ibv_send_wr sq_wr;	/* send work request record */
 	struct ibv_sge send_sgl;
-	struct rping_rdma_info send_buf;/* single send buf */
+	struct rping_rdma_info *send_buf;/* single send buf */
 	struct ibv_mr *send_mr;
 
 	struct ibv_send_wr rdma_sq_wr;	/* rdma work request record */
@@ -246,14 +246,14 @@ static int rping_cma_event_handler(struct rdma_cm_id *cma_id,
 
 static int server_recv(struct rping_cb *cb, struct ibv_exp_wc *wc)
 {
-	if (wc->byte_len != sizeof(cb->recv_buf)) {
+	if (wc->byte_len != sizeof(*cb->recv_buf)) {
 		fprintf(stderr, "Received bogus data, size %d\n", wc->byte_len);
 		return -1;
 	}
 
-	cb->remote_rkey = ntohl(cb->recv_buf.rkey);
-	cb->remote_addr = ntohll(cb->recv_buf.buf);
-	cb->remote_len  = ntohl(cb->recv_buf.size);
+	cb->remote_rkey = ntohl(cb->recv_buf->rkey);
+	cb->remote_addr = ntohll(cb->recv_buf->buf);
+	cb->remote_len  = ntohl(cb->recv_buf->size);
 	DEBUG_LOG("Received rkey %x addr %" PRIx64 " len %d from peer\n",
 		  cb->remote_rkey, cb->remote_addr, cb->remote_len);
 
@@ -267,7 +267,7 @@ static int server_recv(struct rping_cb *cb, struct ibv_exp_wc *wc)
 
 static int client_recv(struct rping_cb *cb, struct ibv_exp_wc *wc)
 {
-	if (wc->byte_len != sizeof(cb->recv_buf)) {
+	if (wc->byte_len != sizeof(*cb->recv_buf)) {
 		fprintf(stderr, "Received bogus data, size %d\n", wc->byte_len);
 		return -1;
 	}
@@ -280,7 +280,7 @@ static int client_recv(struct rping_cb *cb, struct ibv_exp_wc *wc)
 	return 0;
 }
 
-static int rping_cq_event_handler(struct rping_cb *cb)
+/*static int rping_cq_event_handler(struct rping_cb *cb)
 {
 	struct ibv_exp_wc wc;
 	struct ibv_recv_wr *bad_wr;
@@ -360,6 +360,96 @@ error:
 	cb->state = ERROR;
 	sem_post(&cb->sem);
 	return ret;
+}*/
+
+static int rping_cq_event_handler(struct rping_cb *cb)
+{
+	struct ibv_wc wc;
+	struct ibv_recv_wr *bad_wr;
+	int ret;
+	int flushed = 0;
+	int sem_num;
+
+	while ((ret = ibv_poll_cq(cb->cq, 1, &wc)) == 1) {
+		ret = 0;
+
+		if (wc.status) {
+			if (wc.status == IBV_WC_WR_FLUSH_ERR) {
+				flushed = 1;
+				continue;
+
+			}
+			fprintf(stderr,
+				"cq completion failed status %d\n",
+				wc.status);
+			ret = -1;
+			goto error;
+		}
+
+		switch (wc.opcode) {
+		case IBV_WC_SEND:
+			DEBUG_LOG("send completion\n");
+			break;
+
+		case IBV_WC_RDMA_WRITE:
+			DEBUG_LOG("rdma write completion\n");
+			cb->state = RDMA_WRITE_COMPLETE;
+			sem_post(&cb->sem);
+			break;
+
+		case IBV_WC_RDMA_READ:
+			DEBUG_LOG("rdma read completion\n");
+			cb->state = RDMA_READ_COMPLETE;
+			sem_post(&cb->sem);
+			break;
+
+		case IBV_WC_RECV:
+			sem_getvalue(&cb->sem, &sem_num);
+			DEBUG_LOG("recv completion -- %d\n", sem_num);
+			ret = cb->server ? server_recv(cb, &wc) :
+					   client_recv(cb, &wc);
+			if (ret) {
+				fprintf(stderr, "recv wc error: %d\n", ret);
+				goto error;
+			}
+
+			ret = ibv_post_recv(cb->qp, &cb->rq_wr, &bad_wr);
+			if (ret) {
+				fprintf(stderr, "post recv error: %d\n", ret);
+				goto error;
+			}
+
+			sem_post(&cb->sem);
+
+			sem_getvalue(&cb->sem, &sem_num);
+			printf("After sem_post in IBV_WC_RECV -- %d,  %d\n", sem_num, &cb->sem);
+			fflush(stdout);
+
+			break;
+
+		case IBV_WC_BIND_MW:
+			DEBUG_LOG("bind completion\n");
+			break;
+		case IBV_WC_LOCAL_INV:
+			DEBUG_LOG("local inv completion\n");
+			break;
+
+		default:
+			DEBUG_LOG("unknown!!!!! completion\n");
+			ret = -1;
+			goto error;
+		}
+	}
+	if (ret) {
+		fprintf(stderr, "poll error %d\n", ret);
+		goto error;
+	}
+	return flushed;
+
+error:
+	cb->state = ERROR;
+	sem_post(&cb->sem);
+	return ret;
 }
 
 static int rping_accept(struct rping_cb *cb)
@@ -384,14 +474,14 @@ static int rping_accept(struct rping_cb *cb)
 
 static void rping_setup_wr(struct rping_cb *cb)
 {
-	cb->recv_sgl.addr = (uint64_t) (unsigned long) &cb->recv_buf;
-	cb->recv_sgl.length = sizeof cb->recv_buf;
+	cb->recv_sgl.addr = (uint64_t) (unsigned long) cb->recv_buf;
+	cb->recv_sgl.length = sizeof *cb->recv_buf;
 	cb->recv_sgl.lkey = cb->recv_mr->lkey;
 	cb->rq_wr.sg_list = &cb->recv_sgl;
 	cb->rq_wr.num_sge = 1;
 
-	cb->send_sgl.addr = (uint64_t) (unsigned long) &cb->send_buf;
-	cb->send_sgl.length = sizeof cb->send_buf;
+	cb->send_sgl.addr = (uint64_t) (unsigned long) cb->send_buf;
+	cb->send_sgl.length = sizeof *cb->send_buf;
 	cb->send_sgl.lkey = cb->send_mr->lkey;
 
 	cb->sq_wr.opcode = IBV_WR_SEND;
@@ -412,26 +502,33 @@ static int rping_setup_buffers(struct rping_cb *cb)
 
 	DEBUG_LOG("rping_setup_buffers called on cb %p\n", cb);
 
-	cb->recv_mr = ibv_reg_mr(cb->pd, &cb->recv_buf, sizeof cb->recv_buf,
-				 IBV_ACCESS_LOCAL_WRITE);
+	//cb->recv_mr = ibv_reg_mr(cb->pd, &cb->recv_buf, sizeof cb->recv_buf,
+	//			 IBV_ACCESS_LOCAL_WRITE);
+
+	cb->recv_mr = ibv_reg_mr_ff(cb->pd, &cb->recv_buf, sizeof *cb->recv_buf,
+				 IBV_ACCESS_LOCAL_WRITE, "cb.recv_mr");
+
 	if (!cb->recv_mr) {
 		fprintf(stderr, "recv_buf reg_mr failed\n");
 		return errno;
 	}
 
-	cb->send_mr = ibv_reg_mr(cb->pd, &cb->send_buf, sizeof cb->send_buf, 0);
+//	cb->send_mr = ibv_reg_mr(cb->pd, &cb->send_buf, sizeof cb->send_buf, 0);
+	cb->send_mr = ibv_reg_mr_ff(cb->pd, &cb->send_buf, sizeof *cb->send_buf, 0, "cb.send_mr");
+
 	if (!cb->send_mr) {
 		fprintf(stderr, "send_buf reg_mr failed\n");
 		ret = errno;
 		goto err1;
 	}
 
-	cb->rdma_buf = malloc(cb->size);
+	cb->rdma_buf = NULL;
+	/*cb->rdma_buf = malloc(cb->size);
 	if (!cb->rdma_buf) {
 		fprintf(stderr, "rdma_buf malloc failed\n");
 		ret = -ENOMEM;
 		goto err2;
-	}
+	}*/
 
 	int access = IBV_ACCESS_LOCAL_WRITE |
 		     IBV_ACCESS_REMOTE_READ |
@@ -440,7 +537,9 @@ static int rping_setup_buffers(struct rping_cb *cb)
 	if (cb->check_mw)
 		access |= IBV_ACCESS_MW_BIND;
 
-	cb->rdma_mr = ibv_reg_mr(cb->pd, cb->rdma_buf, cb->size, access);
+	//cb->rdma_mr = ibv_reg_mr(cb->pd, cb->rdma_buf, cb->size, access);
+	cb->rdma_mr = ibv_reg_mr_ff(cb->pd, &cb->rdma_buf, cb->size, access, "cb.rdma_mr");
+
 	if (!cb->rdma_mr) {
 		fprintf(stderr, "rdma_buf reg_mr failed\n");
 		ret = errno;
@@ -459,15 +558,20 @@ static int rping_setup_buffers(struct rping_cb *cb)
 	}
 
 	if (!cb->server) {
-		cb->start_buf = malloc(cb->size);
+		cb->start_buf = NULL;
+		/*cb->start_buf = malloc(cb->size);
 		if (!cb->start_buf) {
 			fprintf(stderr, "start_buf malloc failed\n");
 			ret = -ENOMEM;
 			goto err5;
-		}
+		}*/
 
-		cb->start_mr = ibv_reg_mr(cb->pd, cb->start_buf,
-					  cb->size, access);
+		//cb->start_mr = ibv_reg_mr(cb->pd, cb->start_buf,
+		//			  cb->size, access);
+
+		cb->start_mr = ibv_reg_mr_ff(cb->pd, &cb->start_buf,
+					  cb->size, access, "cb.start_mr");
+	
 		if (!cb->start_mr) {
 			fprintf(stderr, "start_buf reg_mr failed\n");
 			ret = errno;
@@ -649,6 +753,7 @@ static void *cm_thread(void *arg)
 		}
 		ret = rping_cma_event_handler(event->id, event);
 		rdma_ack_cm_event(event);
+
 		if (ret)
 			exit(ret);
 	}
@@ -764,7 +869,7 @@ static void rping_rebind_mw(struct ibv_qp *qp, struct ibv_mw *mw,
 
 static void rping_format_send(struct rping_cb *cb, char *buf, uint32_t rkey)
 {
-	struct rping_rdma_info *info = &cb->send_buf;
+	struct rping_rdma_info *info = cb->send_buf;
 
 	info->buf = htonll((uint64_t) (unsigned long) buf);
 	info->rkey = htonl(rkey);
@@ -778,10 +883,15 @@ static int rping_test_server(struct rping_cb *cb)
 {
 	struct ibv_send_wr *bad_wr;
 	int ret;
+	int sem_num;
 
 	while (1) {
+		sem_getvalue(&cb->sem, &sem_num);
+		printf("Before sem wait --> sem_num = %d, %d\n", sem_num, &cb->sem);
+		fflush(stdout);
 		/* Wait for client's Start STAG/TO/Len */
 		sem_wait(&cb->sem);
+	
 		if (cb->state != RDMA_READ_ADV) {
 			fprintf(stderr, "wait for RDMA_READ_ADV state %d\n",
 				cb->state);
@@ -897,6 +1007,7 @@ static int rping_bind_server(struct rping_cb *cb)
 		return ret;
 	}
 
+	DEBUG_LOG("rdma_listen end ##\n");
 	return 0;
 }
 
@@ -939,12 +1050,6 @@ static void *rping_persistent_server_thread(void *arg)
 		goto err2;
 	}
 
-	ret = pthread_create(&cb->cqthread, NULL, cq_thread, cb);
-	if (ret) {
-		perror("pthread_create");
-		goto err2;
-	}
-
 	ret = rping_accept(cb);
 	if (ret) {
 		fprintf(stderr, "connect error %d\n", ret);
@@ -952,6 +1057,7 @@ static void *rping_persistent_server_thread(void *arg)
 	}
 
 	rping_test_server(cb);
+
 	rdma_disconnect(cb->child_cm_id);
 	pthread_join(cb->cqthread, NULL);
 	rping_free_buffers(cb);
@@ -1026,7 +1132,12 @@ static int rping_run_server(struct rping_cb *cb)
 	if (ret)
 		return ret;
 
+	printf("Before sem_wait for CONNECT_REQUEST\n");
+	fflush(stdout);
 	sem_wait(&cb->sem);
+	printf("After sem_wait for CONNECT_REQUEST\n");
+	fflush(stdout);
+	
 	if (cb->state != CONNECT_REQUEST) {
 		fprintf(stderr, "wait for CONNECT_REQUEST state %d\n",
 			cb->state);
@@ -1064,6 +1175,7 @@ static int rping_run_server(struct rping_cb *cb)
 	}
 
 	ret = rping_test_server(cb);
+
 	if (ret && ret != -1) {
 		fprintf(stderr, "rping server failed: %d\n", ret);
 		goto err3;
@@ -1197,6 +1309,7 @@ static int rping_connect_client(struct rping_cb *cb)
 		return ret;
 	}
 
+	printf("Before sem_wait for CONNECT\n");
 	sem_wait(&cb->sem);
 	if (cb->state != CONNECTED) {
 		fprintf(stderr, "wait for CONNECTED state %d\n", cb->state);
@@ -1222,6 +1335,7 @@ static int rping_bind_client(struct rping_cb *cb)
 		return ret;
 	}
 
+	printf("Before sem_wait for ROUTE_RESOLVED\n");
 	sem_wait(&cb->sem);
 	if (cb->state != ROUTE_RESOLVED) {
 		fprintf(stderr, "waiting for addr/route resolution state %d\n",
@@ -1242,6 +1356,8 @@ static int rping_run_client(struct rping_cb *cb)
 	if (ret)
 		return ret;
 
+	printf("[Finish] rping_bind_client\n");
+	fflush(stdout);
 	if (cb->check_mw) {
 		ret = rping_verify_mw_cap(cb->cm_id);
 		if (ret) {
@@ -1250,42 +1366,56 @@ static int rping_run_client(struct rping_cb *cb)
 		}
 	}
 
+	printf("[Finish] rping_vefify_mw_cap\n");
+	fflush(stdout);
 	ret = rping_setup_qp(cb, cb->cm_id);
 	if (ret) {
 		fprintf(stderr, "setup_qp failed: %d\n", ret);
 		return ret;
 	}
 
+	printf("[Finish] rping_setup_qp\n");
+	fflush(stdout);
 	ret = rping_setup_buffers(cb);
 	if (ret) {
 		fprintf(stderr, "rping_setup_buffers failed: %d\n", ret);
 		goto err1;
 	}
 
+	printf("[Finish] rping_setup_buffers\n");
+	fflush(stdout);
 	ret = ibv_post_recv(cb->qp, &cb->rq_wr, &bad_wr);
 	if (ret) {
 		fprintf(stderr, "ibv_post_recv failed: %d\n", ret);
 		goto err2;
 	}
 
+	printf("[Finish] ibv_post_recv\n");
+	fflush(stdout);
 	ret = pthread_create(&cb->cqthread, NULL, cq_thread, cb);
 	if (ret) {
 		perror("pthread_create");
 		goto err2;
 	}
 
+	printf("[Finish] pthread_create, cq_thread\n");
+	fflush(stdout);
 	ret = rping_connect_client(cb);
 	if (ret) {
 		fprintf(stderr, "connect error %d\n", ret);
 		goto err3;
 	}
 
+	printf("[Finish] rping_connect_client\n");
+	fflush(stdout);
 	ret = rping_test_client(cb);
 	if (ret) {
 		fprintf(stderr, "rping client failed: %d\n", ret);
 		goto err4;
 	}
 
+	printf("[Finish] Done!\n");
+	fflush(stdout);
 	ret = 0;
 err4:
 	rdma_disconnect(cb->cm_id);
@@ -1304,6 +1434,7 @@ static int get_addr(char *dst, struct sockaddr *addr)
 	struct addrinfo *res;
 	int ret;
 
+	printf("dst --> %s\n", dst);
 	ret = getaddrinfo(dst, NULL, NULL, &res);
 	if (ret) {
 		printf("getaddrinfo failed - invalid hostname or IP address\n");

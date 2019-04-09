@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2007 Cisco, Inc.  All rights reserved.
+ * Copyright (c) Microsoft Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -508,10 +509,10 @@ static int mlx4_init_context(struct verbs_device *v_device,
 			return errno;
 
 		VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof(resp));
-		qp_tab_size			= resp.qp_tab_size;
-		bf_reg_size			= resp.bf_reg_size;
-		context->bf_regs_per_page	= resp.bf_regs_per_page;
-		cqe_size			= resp.cqe_size;
+		qp_tab_size			= 524288;//resp.qp_tab_size;
+		bf_reg_size			= 512;//resp.bf_reg_size;
+		context->bf_regs_per_page	= 8;//resp.bf_regs_per_page;
+		cqe_size			= 64;//resp.cqe_size;
 	} else {
 		if (ibv_cmd_get_context(ibv_ctx, &req.cmd, sizeof(req.cmd),
 					&resp_v3.ibv_resp, sizeof(resp_v3)))
@@ -527,6 +528,8 @@ static int mlx4_init_context(struct verbs_device *v_device,
 	context->num_qps	= qp_tab_size;
 	context->qp_table_shift = ffs(context->num_qps) - 1 - MLX4_QP_TABLE_BITS;
 	context->qp_table_mask	= (1 << context->qp_table_shift) - 1;
+        printf("context->qp_table_mask=%d\n", context->qp_table_mask);
+	fflush(stdout);
 	context->cqe_size = cqe_size;
 	for (i = 0; i < MLX4_PORTS_NUM; ++i)
 		context->port_query_cache[i].valid = 0;
@@ -541,10 +544,10 @@ static int mlx4_init_context(struct verbs_device *v_device,
 	mlx4_init_xsrq_table(&context->xsrq_table, qp_tab_size);
 	pthread_mutex_init(&context->db_list_mutex, NULL);
 
-	context->uar = mmap(NULL, dev->page_size, PROT_WRITE,
+	/*context->uar = mmap(NULL, dev->page_size, PROT_WRITE,
 			    MAP_SHARED, cmd_fd, 0);
 	if (context->uar == MAP_FAILED)
-		return errno;
+		return errno;*/
 
 	if (bf_reg_size) {
 		context->bfs.page = mmap(NULL, dev->page_size,
@@ -595,12 +598,12 @@ static int mlx4_init_context(struct verbs_device *v_device,
 			      IBV_EXP_DEVICE_ATTR_EXP_CAP_FLAGS |
 			      IBV_EXP_DEVICE_ATTR_MAX_CTX_RES_DOMAIN;
 
-	if (mlx4_exp_query_device(ibv_ctx, &dev_attrs)) {
+	/*if (mlx4_exp_query_device(ibv_ctx, &dev_attrs)) {
 		if (mlx4_query_device(ibv_ctx, &dev_legacy_attrs))
 			goto query_free;
 
 		memcpy(&dev_attrs, &dev_legacy_attrs, sizeof(dev_legacy_attrs));
-	}
+	}*/
 
 	context->max_qp_wr = dev_attrs.max_qp_wr;
 	context->max_sge = dev_attrs.max_sge;
@@ -609,7 +612,7 @@ static int mlx4_init_context(struct verbs_device *v_device,
 	if (dev_attrs.comp_mask & IBV_EXP_DEVICE_ATTR_MAX_CTX_RES_DOMAIN)
 		context->max_ctx_res_domain = dev_attrs.max_ctx_res_domain;
 
-	VALGRIND_MAKE_MEM_DEFINED(&context->hca_core_clock, sizeof(context->hca_core_clock));
+	/*VALGRIND_MAKE_MEM_DEFINED(&context->hca_core_clock, sizeof(context->hca_core_clock));
 	if (dev_attrs.comp_mask & IBV_EXP_DEVICE_ATTR_WITH_HCA_CORE_CLOCK) {
 		if (dev_attrs.hca_core_clock)
 			context->core_clk.mult = ((1ull * 1000) << 29) /
@@ -640,7 +643,7 @@ static int mlx4_init_context(struct verbs_device *v_device,
 					context->core_clk.offset;
 			}
 		}
-	}
+	}*/
 
 	ibv_ctx->ops = mlx4_ctx_ops;
 

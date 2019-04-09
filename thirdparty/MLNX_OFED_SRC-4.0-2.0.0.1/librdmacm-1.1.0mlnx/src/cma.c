@@ -59,6 +59,8 @@
 #include <rdma/rdma_cma_abi.h>
 #include <rdma/rdma_verbs.h>
 #include <infiniband/ib.h>
+#include <infiniband/freeflow-types.h>
+#include <rdma/freeflow.h>
 
 #define CMA_INIT_CMD(req, req_size, op)		\
 do {						\
@@ -266,6 +268,12 @@ err1:
 
 static struct ibv_context *ucma_open_device(uint64_t guid)
 {
+	if (PRINT_LOG)
+	{
+		printf("### ucma_open_device ###\n");
+		fflush(stdout);
+	}
+
 	struct ibv_device **dev_list;
 	struct ibv_context *verbs = NULL;
 	int i;
@@ -288,6 +296,12 @@ static struct ibv_context *ucma_open_device(uint64_t guid)
 
 static int ucma_init_device(struct cma_device *cma_dev)
 {
+	if (PRINT_LOG)
+	{
+		printf("### ucma_init_device ###\n");
+		fflush(stdout);
+	}
+
 	struct ibv_port_attr port_attr;
 	struct ibv_device_attr attr;
 	int i, ret;
@@ -396,16 +410,38 @@ static void __attribute__((destructor)) rdma_cma_fini(void)
 
 struct rdma_event_channel *rdma_create_event_channel(void)
 {
+	if (PRINT_LOG)
+	{
+		printf("### rdma_create_event_channel ###\n");
+		fflush(stdout);
+	}
+
+	init_sock();
+
 	struct rdma_event_channel *channel;
 
 	if (ucma_init())
+	{	
 		return NULL;
+	}
 
 	channel = malloc(sizeof *channel);
 	if (!channel)
+	{
 		return NULL;
+	}
 
-	channel->fd = open("/dev/infiniband/rdma_cm", O_RDWR | O_CLOEXEC);
+	struct CM_CREATE_EVENT_CHANNEL_RSP rsp;
+	int rsp_size;
+	request_router(CM_CREATE_EVENT_CHANNEL, NULL, &rsp, &rsp_size);
+
+	if (PRINT_LOG)
+	{
+		printf("CREATE EVENT CHANNEL = %d\n", rsp.ec.fd);
+		fflush(stdout);
+	}
+
+	channel->fd = rsp.ec.fd;
 	if (channel->fd < 0) {
 		goto err;
 	}
@@ -417,7 +453,13 @@ err:
 
 void rdma_destroy_event_channel(struct rdma_event_channel *channel)
 {
-	close(channel->fd);
+	struct CM_DESTROY_EVENT_CHANNEL_REQ req;
+	req.ec.fd = event_channel_map[channel->fd];
+	struct CM_DESTROY_EVENT_CHANNEL_RSP rsp;
+        int rsp_size;
+        request_router(CM_CREATE_EVENT_CHANNEL, &req, &rsp, &rsp_size);
+
+	//close(channel->fd);
 	free(channel);
 }
 
@@ -555,8 +597,6 @@ static int rdma_create_id2(struct rdma_event_channel *channel,
 			   struct rdma_cm_id **id, void *context,
 			   enum rdma_port_space ps, enum ibv_qp_type qp_type)
 {
-	struct ucma_abi_create_id_resp resp;
-	struct ucma_abi_create_id cmd;
 	struct cma_id_private *id_priv;
 	int ret;
 
@@ -568,18 +608,25 @@ static int rdma_create_id2(struct rdma_event_channel *channel,
 	if (!id_priv)
 		return ERR(ENOMEM);
 
-	CMA_INIT_CMD_RESP(&cmd, sizeof cmd, CREATE_ID, &resp, sizeof resp);
-	cmd.uid = (uintptr_t) id_priv;
-	cmd.ps = ps;
-	cmd.qp_type = qp_type;
+	struct CM_CREATE_ID_REQ req;
+	memset(&req, 0, sizeof req);
+	req.cmd.uid = (uintptr_t) id_priv;
+	req.cmd.ps = ps;
+	req.cmd.qp_type = qp_type;
 
-	ret = write(id_priv->id.channel->fd, &cmd, sizeof cmd);
-	if (ret != sizeof cmd)
-		goto err;
+	req.ec.fd = event_channel_map[id_priv->id.channel->fd];
 
-	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);
+	struct CM_CREATE_ID_RSP rsp;
+	int rsp_size;
+	request_router(CM_CREATE_ID, &req, &rsp, &rsp_size);
+	
+	if (PRINT_LOG)
+	{
+		printf("RDMA CM ID = %d\n", rsp.resp.id);
+		fflush(stdout);
+	}
 
-	id_priv->handle = resp.id;
+	id_priv->handle = rsp.resp.id;
 	ucma_insert_id(id_priv);
 	*id = &id_priv->id;
 	return 0;
@@ -592,6 +639,12 @@ int rdma_create_id(struct rdma_event_channel *channel,
 		   struct rdma_cm_id **id, void *context,
 		   enum rdma_port_space ps)
 {
+	if (PRINT_LOG)
+	{
+		printf("### rdma_create_id ###\n");
+		fflush(stdout);
+	}
+
 	enum ibv_qp_type qp_type;
 
 	qp_type = (ps == RDMA_PS_IPOIB || ps == RDMA_PS_UDP) ?
@@ -599,8 +652,42 @@ int rdma_create_id(struct rdma_event_channel *channel,
 	return rdma_create_id2(channel, id, context, ps, qp_type);
 }
 
+static int rdma_create_id_with_id(struct rdma_event_channel *channel,
+		   struct cma_id_private **id_priv_out, void *context,
+		   enum rdma_port_space ps, uint32_t id_handle)
+{
+	struct cma_id_private *id_priv;
+	int ret;
+	enum ibv_qp_type qp_type;
+
+	qp_type = (ps == RDMA_PS_IPOIB || ps == RDMA_PS_UDP) ?
+		  IBV_QPT_UD : IBV_QPT_RC;
+
+	ret = ucma_init();
+	if (ret)
+		return ret;
+
+	id_priv = ucma_alloc_id(channel, context, ps, qp_type);
+	if (!id_priv)
+		return ERR(ENOMEM);
+
+	id_priv->handle = id_handle;
+	ucma_insert_id(id_priv);
+	*id_priv_out = id_priv;
+	return 0;
+
+err:	ucma_free_id(id_priv);
+	return ret;
+}
+
 static int ucma_destroy_kern_id(int fd, uint32_t handle)
 {
+	if (PRINT_LOG)
+	{
+		printf("### ucma_destory_kern_id ###\n");
+		fflush(stdout);
+	}
+
 	struct ucma_abi_destroy_id_resp resp;
 	struct ucma_abi_destroy_id cmd;
 	int ret;
@@ -608,11 +695,21 @@ static int ucma_destroy_kern_id(int fd, uint32_t handle)
 	CMA_INIT_CMD_RESP(&cmd, sizeof cmd, DESTROY_ID, &resp, sizeof resp);
 	cmd.id = handle;
 
-	ret = write(fd, &cmd, sizeof cmd);
+	/*ret = write(fd, &cmd, sizeof cmd);
 	if (ret != sizeof cmd)
 		return (ret >= 0) ? ERR(ENODATA) : -1;
 
-	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);
+	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);*/
+
+	struct CM_DESTROY_ID_REQ req;
+	memset(&req, 0, sizeof req);
+	req.ec.fd = event_channel_map[fd];
+	memcpy(&req.cmd, &cmd, sizeof cmd);
+	
+	struct CM_DESTROY_ID_RSP rsp;
+	int rsp_size;
+	request_router(CM_DESTROY_ID, &req, &rsp, &rsp_size);
+	memcpy(&resp, &rsp.resp, sizeof(resp));
 
 	return resp.events_reported;
 }
@@ -658,6 +755,12 @@ int ucma_addrlen(struct sockaddr *addr)
 
 static int ucma_query_addr(struct rdma_cm_id *id)
 {
+	if (PRINT_LOG)
+	{
+		printf("### ucma_query_addr ###\n");
+		fflush(stdout);
+	}
+
 	struct ucma_abi_query_addr_resp resp;
 	struct ucma_abi_query cmd;
 	struct cma_id_private *id_priv;
@@ -668,12 +771,22 @@ static int ucma_query_addr(struct rdma_cm_id *id)
 	cmd.id = id_priv->handle;
 	cmd.option = UCMA_QUERY_ADDR;
 
-	ret = write(id->channel->fd, &cmd, sizeof cmd);
+	/*ret = write(id->channel->fd, &cmd, sizeof cmd);
 	if (ret != sizeof cmd)
 		return (ret >= 0) ? ERR(ENODATA) : -1;
 
-	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);
+	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);*/
 
+	struct CM_UCMA_QUERY_ADDR_REQ req;
+	memset(&req, 0, sizeof req);
+	req.ec.fd = event_channel_map[id->channel->fd];
+	memcpy(&req.cmd, &cmd, sizeof cmd);
+
+	struct CM_UCMA_QUERY_ADDR_RSP rsp;
+	int rsp_size;
+	request_router(CM_UCMA_QUERY_ADDR, &req, &rsp, &rsp_size);
+	memcpy(&resp, &rsp.resp, sizeof(resp));
+	
 	memcpy(&id->route.addr.src_addr, &resp.src_addr, resp.src_size);
 	memcpy(&id->route.addr.dst_addr, &resp.dst_addr, resp.dst_size);
 
@@ -690,6 +803,12 @@ static int ucma_query_addr(struct rdma_cm_id *id)
 
 static int ucma_query_gid(struct rdma_cm_id *id)
 {
+	if (PRINT_LOG)
+	{
+		printf("### ucma_query_gid ###\n");
+		fflush(stdout);
+	}
+
 	struct ucma_abi_query_addr_resp resp;
 	struct ucma_abi_query cmd;
 	struct cma_id_private *id_priv;
@@ -701,11 +820,22 @@ static int ucma_query_gid(struct rdma_cm_id *id)
 	cmd.id = id_priv->handle;
 	cmd.option = UCMA_QUERY_GID;
 
-	ret = write(id->channel->fd, &cmd, sizeof cmd);
+	/*ret = write(id->channel->fd, &cmd, sizeof cmd);
 	if (ret != sizeof cmd)
 		return (ret >= 0) ? ERR(ENODATA) : -1;
 
-	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);
+	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);*/
+
+	struct CM_UCMA_QUERY_GID_REQ req;
+	memset(&req, 0, sizeof req);
+	req.ec.fd = event_channel_map[id->channel->fd];
+	memcpy(&req.cmd, &cmd, sizeof cmd);
+
+	struct CM_UCMA_QUERY_GID_RSP rsp;
+	int rsp_size;
+	request_router(CM_UCMA_QUERY_GID, &req, &rsp, &rsp_size);
+
+	memcpy(&resp, &rsp.resp, sizeof(resp));
 
 	sib = (struct sockaddr_ib *) &resp.src_addr;
 	memcpy(id->route.addr.addr.ibaddr.sgid.raw, sib->sib_addr.sib_raw,
@@ -750,6 +880,12 @@ static void ucma_convert_path(struct ibv_path_data *path_data,
 
 static int ucma_query_path(struct rdma_cm_id *id)
 {
+	if (PRINT_LOG)
+	{
+		printf("### ucma_query_path ###\n");
+		fflush(stdout);
+	}
+
 	struct ucma_abi_query_path_resp *resp;
 	struct ucma_abi_query cmd;
 	struct cma_id_private *id_priv;
@@ -757,16 +893,34 @@ static int ucma_query_path(struct rdma_cm_id *id)
 
 	size = sizeof(*resp) + sizeof(struct ibv_path_data) * 6;
 	resp = alloca(size);
+
 	CMA_INIT_CMD_RESP(&cmd, sizeof cmd, QUERY, resp, size);
 	id_priv = container_of(id, struct cma_id_private, id);
 	cmd.id = id_priv->handle;
 	cmd.option = UCMA_QUERY_PATH;
 
-	ret = write(id->channel->fd, &cmd, sizeof cmd);
+	/*ret = write(id->channel->fd, &cmd, sizeof cmd);
 	if (ret != sizeof cmd)
 		return (ret >= 0) ? ERR(ENODATA) : -1;
 
-	VALGRIND_MAKE_MEM_DEFINED(resp, size);
+	VALGRIND_MAKE_MEM_DEFINED(resp, size);*/
+
+	struct CM_UCMA_QUERY_PATH_REQ req;
+	memset(&req, 0, sizeof req);
+	req.ec.fd = event_channel_map[id->channel->fd];
+	memcpy(&req.cmd, &cmd, sizeof cmd);
+
+	struct CM_UCMA_QUERY_PATH_RSP rsp;
+	int rsp_size;
+	request_router(CM_UCMA_QUERY_PATH, &req, &rsp, &rsp_size);
+
+	memcpy(resp, &rsp.resp, size);
+
+	if (PRINT_LOG)
+	{
+		printf("THE RETURN OF QUERY_PATH: %d, num_paths = %d\n", rsp.ret_errno, resp->num_paths);
+		fflush(stdout);
+	}
 
 	if (resp->num_paths) {
 		id->route.path_rec = malloc(sizeof(*id->route.path_rec) *
@@ -784,6 +938,12 @@ static int ucma_query_path(struct rdma_cm_id *id)
 
 static int ucma_query_route(struct rdma_cm_id *id)
 {
+	if (PRINT_LOG)
+	{
+		printf("### ucma_query_route ###\n");
+		fflush(stdout);
+	}
+
 	struct ucma_abi_query_route_resp resp;
 	struct ucma_abi_query cmd;
 	struct cma_id_private *id_priv;
@@ -793,11 +953,21 @@ static int ucma_query_route(struct rdma_cm_id *id)
 	id_priv = container_of(id, struct cma_id_private, id);
 	cmd.id = id_priv->handle;
 
-	ret = write(id->channel->fd, &cmd, sizeof cmd);
+	/*ret = write(id->channel->fd, &cmd, sizeof cmd);
 	if (ret != sizeof cmd)
 		return (ret >= 0) ? ERR(ENODATA) : -1;
 
-	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);
+	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);*/
+
+	struct CM_QUERY_ROUTE_REQ req;
+	memset(&req, 0, sizeof req);
+	req.ec.fd = event_channel_map[id->channel->fd];
+	memcpy(&req.cmd, &cmd, sizeof cmd);
+
+	struct CM_QUERY_ROUTE_RSP rsp;
+	int rsp_size;
+	request_router(CM_QUERY_ROUTE, &req, &rsp, &rsp_size);
+	memcpy(&resp, &rsp.resp, sizeof(resp));
 
 	if (resp.num_paths) {
 		id->route.path_rec = malloc(sizeof *id->route.path_rec *
@@ -834,6 +1004,12 @@ static int ucma_query_route(struct rdma_cm_id *id)
 static int rdma_bind_addr2(struct rdma_cm_id *id, struct sockaddr *addr,
 			   socklen_t addrlen)
 {
+	if (PRINT_LOG)
+	{
+		printf("### rdma_bind_addr2 ###\n");
+		fflush(stdout);
+	}
+
 	struct ucma_abi_bind cmd;
 	struct cma_id_private *id_priv;
 	int ret;
@@ -844,9 +1020,22 @@ static int rdma_bind_addr2(struct rdma_cm_id *id, struct sockaddr *addr,
 	cmd.addr_size = addrlen;
 	memcpy(&cmd.addr, addr, addrlen);
 
-	ret = write(id->channel->fd, &cmd, sizeof cmd);
+	/*ret = write(id->channel->fd, &cmd, sizeof cmd);
 	if (ret != sizeof cmd)
-		return (ret >= 0) ? ERR(ENODATA) : -1;
+		return (ret >= 0) ? ERR(ENODATA) : -1;*/
+
+	struct CM_BIND_REQ req;
+	memset(&req, 0, sizeof req);
+	req.ec.fd = event_channel_map[id->channel->fd];
+	memcpy(&req.cmd, &cmd, sizeof cmd);
+
+	struct CM_BIND_RSP rsp;
+	int rsp_size;
+	request_router(CM_BIND, &req, &rsp, &rsp_size);
+	printf("rsp.ret_errno --> %d\n", rsp.ret_errno);
+	fflush(stdout);
+	if (rsp.ret_errno != 0)
+		return rsp.ret_errno >= 0;
 
 	ret = ucma_query_addr(id);
 	if (!ret)
@@ -856,11 +1045,18 @@ static int rdma_bind_addr2(struct rdma_cm_id *id, struct sockaddr *addr,
 
 int rdma_bind_addr(struct rdma_cm_id *id, struct sockaddr *addr)
 {
+	if (PRINT_LOG)
+	{
+		printf("### rdma_bind_addr ###\n");
+		fflush(stdout);
+	}
+
 	struct ucma_abi_bind_ip cmd;
 	struct cma_id_private *id_priv;
 	int ret, addrlen;
 	
 	addrlen = ucma_addrlen(addr);
+
 	if (!addrlen)
 		return ERR(EINVAL);
 
@@ -872,21 +1068,40 @@ int rdma_bind_addr(struct rdma_cm_id *id, struct sockaddr *addr)
 	cmd.id = id_priv->handle;
 	memcpy(&cmd.addr, addr, addrlen);
 
-	ret = write(id->channel->fd, &cmd, sizeof cmd);
+	/*ret = write(id->channel->fd, &cmd, sizeof cmd);
 	if (ret != sizeof cmd)
-		return (ret >= 0) ? ERR(ENODATA) : -1;
+		return (ret >= 0) ? ERR(ENODATA) : -1;*/
 
+	struct CM_BIND_IP_REQ req;
+	memset(&req, 0, sizeof req);
+	req.ec.fd = event_channel_map[id->channel->fd];
+	memcpy(&req.cmd, &cmd, sizeof cmd);
+
+	struct CM_BIND_IP_RSP rsp;
+	int rsp_size;
+	request_router(CM_BIND_IP, &req, &rsp, &rsp_size);
+	if (rsp.ret_errno != 0)
+		return rsp.ret_errno;
+	
 	return ucma_query_route(id);
 }
 
 int ucma_complete(struct rdma_cm_id *id)
 {
+	if (PRINT_LOG)
+	{
+		printf("### ucma_complete ###\n");
+		fflush(stdout);
+	}
+
 	struct cma_id_private *id_priv;
 	int ret;
 
 	id_priv = container_of(id, struct cma_id_private, id);
 	if (!id_priv->sync)
+	{
 		return 0;
+	}
 
 	if (id_priv->id.event) {
 		rdma_ack_cm_event(id_priv->id.event);
@@ -896,7 +1111,7 @@ int ucma_complete(struct rdma_cm_id *id)
 	ret = rdma_get_cm_event(id_priv->id.channel, &id_priv->id.event);
 	if (ret)
 		return ret;
-
+	
 	if (id_priv->id.event->status) {
 		if (id_priv->id.event->event == RDMA_CM_EVENT_REJECTED)
 			ret = ERR(ECONNREFUSED);
@@ -905,6 +1120,7 @@ int ucma_complete(struct rdma_cm_id *id)
 		else
 			ret = ERR(-id_priv->id.event->status);
 	}
+
 	return ret;
 }
 
@@ -912,6 +1128,12 @@ static int rdma_resolve_addr2(struct rdma_cm_id *id, struct sockaddr *src_addr,
 			      socklen_t src_len, struct sockaddr *dst_addr,
 			      socklen_t dst_len, int timeout_ms)
 {
+	if (PRINT_LOG)
+	{
+		printf("### rdma_resolve_addr2 ###\n");
+		fflush(stdout);
+	}
+
 	struct ucma_abi_resolve_addr cmd;
 	struct cma_id_private *id_priv;
 	int ret;
@@ -925,9 +1147,36 @@ static int rdma_resolve_addr2(struct rdma_cm_id *id, struct sockaddr *src_addr,
 	cmd.dst_size = dst_len;
 	cmd.timeout_ms = timeout_ms;
 
-	ret = write(id->channel->fd, &cmd, sizeof cmd);
+	/*ret = write(id->channel->fd, &cmd, sizeof cmd);
 	if (ret != sizeof cmd)
-		return (ret >= 0) ? ERR(ENODATA) : -1;
+		return (ret >= 0) ? ERR(ENODATA) : -1;*/
+
+	struct CM_RESOLVE_ADDR_REQ req;
+	memset(&req, 0, sizeof req);
+	req.ec.fd = event_channel_map[id->channel->fd];
+	memcpy(&req.cmd, &cmd, sizeof cmd);
+
+	if (src_addr && PRINT_LOG)
+	{
+		struct sockaddr_in *addr_str = (struct sockaddr_in *) src_addr;
+		char astring[INET_ADDRSTRLEN];
+        	inet_ntop(AF_INET, &addr_str->sin_addr, astring, INET_ADDRSTRLEN);
+		printf("Resolving Src IP %s\n", astring);
+		fflush(stdout);
+	}
+
+	if (dst_addr && PRINT_LOG)
+	{
+		struct sockaddr_in *addr_str = (struct sockaddr_in *) dst_addr;
+		char astring[INET_ADDRSTRLEN];
+        	inet_ntop(AF_INET, &addr_str->sin_addr, astring, INET_ADDRSTRLEN);
+		printf("Resolving Dst IP %s\n", astring);
+		fflush(stdout);
+	}
+
+	struct CM_RESOLVE_ADDR_RSP rsp;
+	int rsp_size;
+	request_router(CM_RESOLVE_ADDR, &req, &rsp, &rsp_size);
 
 	memcpy(&id->route.addr.dst_addr, dst_addr, dst_len);
 	return ucma_complete(id);
@@ -936,6 +1185,12 @@ static int rdma_resolve_addr2(struct rdma_cm_id *id, struct sockaddr *src_addr,
 int rdma_resolve_addr(struct rdma_cm_id *id, struct sockaddr *src_addr,
 		      struct sockaddr *dst_addr, int timeout_ms)
 {
+	if (PRINT_LOG)
+	{
+		printf("### rdma_resolve_addr ###\n");
+		fflush(stdout);
+	}
+
 	struct ucma_abi_resolve_ip cmd;
 	struct cma_id_private *id_priv;
 	int ret, dst_len, src_len;
@@ -960,9 +1215,36 @@ int rdma_resolve_addr(struct rdma_cm_id *id, struct sockaddr *src_addr,
 	memcpy(&cmd.dst_addr, dst_addr, dst_len);
 	cmd.timeout_ms = timeout_ms;
 
-	ret = write(id->channel->fd, &cmd, sizeof cmd);
+	/*ret = write(id->channel->fd, &cmd, sizeof cmd);
 	if (ret != sizeof cmd)
-		return (ret >= 0) ? ERR(ENODATA) : -1;
+		return (ret >= 0) ? ERR(ENODATA) : -1;*/
+
+	struct CM_RESOLVE_IP_REQ req;
+	memset(&req, 0, sizeof req);
+	req.ec.fd = event_channel_map[id->channel->fd];
+	memcpy(&req.cmd, &cmd, sizeof cmd);
+	
+	if (src_addr && PRINT_LOG)
+	{
+		struct sockaddr_in *addr_str = (struct sockaddr_in *) src_addr;
+		char astring[INET_ADDRSTRLEN];
+        	inet_ntop(AF_INET, &addr_str->sin_addr, astring, INET_ADDRSTRLEN);
+		printf("Resolving Src IP %s\n", astring);
+		fflush(stdout);
+	}
+
+	if (dst_addr && PRINT_LOG)
+	{
+		struct sockaddr_in *addr_str = (struct sockaddr_in *) dst_addr;
+		char astring[INET_ADDRSTRLEN];
+        	inet_ntop(AF_INET, &addr_str->sin_addr, astring, INET_ADDRSTRLEN);
+		printf("Resolving Dst IP %s\n", astring);
+		fflush(stdout);
+	}
+
+	struct CM_RESOLVE_IP_RSP rsp;
+	int rsp_size;
+	request_router(CM_RESOLVE_IP, &req, &rsp, &rsp_size);
 
 	memcpy(&id->route.addr.dst_addr, dst_addr, dst_len);
 	return ucma_complete(id);
@@ -997,6 +1279,12 @@ static int ucma_set_ib_route(struct rdma_cm_id *id)
 
 int rdma_resolve_route(struct rdma_cm_id *id, int timeout_ms)
 {
+	if (PRINT_LOG)
+	{
+		printf("### rdma_resolve_route ###\n");
+		fflush(stdout);
+	}
+
 	struct ucma_abi_resolve_route cmd;
 	struct cma_id_private *id_priv;
 	int ret;
@@ -1012,9 +1300,18 @@ int rdma_resolve_route(struct rdma_cm_id *id, int timeout_ms)
 	cmd.id = id_priv->handle;
 	cmd.timeout_ms = timeout_ms;
 
-	ret = write(id->channel->fd, &cmd, sizeof cmd);
+	/*ret = write(id->channel->fd, &cmd, sizeof cmd);
 	if (ret != sizeof cmd)
-		return (ret >= 0) ? ERR(ENODATA) : -1;
+		return (ret >= 0) ? ERR(ENODATA) : -1;*/
+
+	struct CM_RESOLVE_ROUTE_REQ req;
+	memset(&req, 0, sizeof req);
+	req.ec.fd = event_channel_map[id->channel->fd];
+	memcpy(&req.cmd, &cmd, sizeof cmd);
+
+	struct CM_RESOLVE_ROUTE_RSP rsp;
+	int rsp_size;
+	request_router(CM_RESOLVE_ROUTE, &req, &rsp, &rsp_size);
 
 out:
 	return ucma_complete(id);
@@ -1028,6 +1325,12 @@ static int ucma_is_ud_qp(enum ibv_qp_type qp_type)
 static int rdma_init_qp_attr(struct rdma_cm_id *id, struct ibv_qp_attr *qp_attr,
 			     int *qp_attr_mask)
 {
+	if (PRINT_LOG)
+	{
+		printf("### rdma_init_qp_attr ###\n");
+		fflush(stdout);
+	}
+
 	struct ucma_abi_init_qp_attr cmd;
 	struct ibv_kern_qp_attr resp;
 	struct cma_id_private *id_priv;
@@ -1038,11 +1341,21 @@ static int rdma_init_qp_attr(struct rdma_cm_id *id, struct ibv_qp_attr *qp_attr,
 	cmd.id = id_priv->handle;
 	cmd.qp_state = qp_attr->qp_state;
 
-	ret = write(id->channel->fd, &cmd, sizeof cmd);
+	/*ret = write(id->channel->fd, &cmd, sizeof cmd);
 	if (ret != sizeof cmd)
 		return (ret >= 0) ? ERR(ENODATA) : -1;
 
-	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);
+	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);*/
+	
+	struct CM_INIT_QP_ATTR_REQ req;
+	memset(&req, 0, sizeof req);
+	req.ec.fd = event_channel_map[id->channel->fd];
+	memcpy(&req.cmd, &cmd, sizeof cmd);
+
+	struct CM_INIT_QP_ATTR_RSP rsp;
+	int rsp_size;
+	request_router(CM_INIT_QP_ATTR, &req, &rsp, &rsp_size);
+	memcpy(&resp, &rsp.resp, sizeof resp);
 
 	ibv_copy_qp_attr_from_kern(qp_attr, &resp);
 	*qp_attr_mask = resp.qp_attr_mask;
@@ -1613,9 +1926,18 @@ int rdma_connect(struct rdma_cm_id *id, struct rdma_conn_param *conn_param)
 					     conn_param, 0, 0);
 	}
 
-	ret = write(id->channel->fd, &cmd, sizeof cmd);
+	/*ret = write(id->channel->fd, &cmd, sizeof cmd);
 	if (ret != sizeof cmd)
-		return (ret >= 0) ? ERR(ENODATA) : -1;
+		return (ret >= 0) ? ERR(ENODATA) : -1;*/
+
+	struct CM_CONNECT_REQ req;
+	memset(&req, 0, sizeof req);
+	req.ec.fd = event_channel_map[id->channel->fd];
+	memcpy(&req.cmd, &cmd, sizeof cmd);
+
+	struct CM_CONNECT_RSP rsp;
+	int rsp_size;
+	request_router(CM_CONNECT, &req, &rsp, &rsp_size);
 
 	if (id_priv->connect_len) {
 		free(id_priv->connect);
@@ -1636,9 +1958,18 @@ int rdma_listen(struct rdma_cm_id *id, int backlog)
 	cmd.id = id_priv->handle;
 	cmd.backlog = backlog;
 
-	ret = write(id->channel->fd, &cmd, sizeof cmd);
+	/*ret = write(id->channel->fd, &cmd, sizeof cmd);
 	if (ret != sizeof cmd)
-		return (ret >= 0) ? ERR(ENODATA) : -1;
+		return (ret >= 0) ? ERR(ENODATA) : -1;*/
+
+	struct CM_LISTEN_REQ req;
+	memset(&req, 0, sizeof req);
+	req.ec.fd = event_channel_map[id->channel->fd];
+	memcpy(&req.cmd, &cmd, sizeof cmd);
+
+	struct CM_LISTEN_RSP rsp;
+	int rsp_size;
+	request_router(CM_LISTEN, &req, &rsp, &rsp_size);
 
 	if (af_ib_support)
 		return ucma_query_addr(id);
@@ -1648,11 +1979,23 @@ int rdma_listen(struct rdma_cm_id *id, int backlog)
 
 int rdma_get_request(struct rdma_cm_id *listen, struct rdma_cm_id **id)
 {
+	if (PRINT_LOG)
+	{
+		printf("@@@ rdma_get_request @@@\n");
+		fflush(stdout);
+	}
+
 	struct cma_id_private *id_priv;
 	struct rdma_cm_event *event;
 	int ret;
 
 	id_priv = container_of(listen, struct cma_id_private, id);
+	if (PRINT_LOG)
+	{
+		printf("@@@ id_priv --> %d\n", id_priv);
+		fflush(stdout);
+	}
+
 	if (!id_priv->sync)
 		return ERR(EINVAL);
 
@@ -1695,6 +2038,12 @@ err:
 
 int rdma_accept(struct rdma_cm_id *id, struct rdma_conn_param *conn_param)
 {
+	if (PRINT_LOG)
+	{
+		printf("### rdma_accept ###\n");
+		fflush(stdout);
+	}
+
 	struct ucma_abi_accept cmd;
 	struct cma_id_private *id_priv;
 	int ret;
@@ -1739,11 +2088,20 @@ int rdma_accept(struct rdma_cm_id *id, struct rdma_conn_param *conn_param)
 					     conn_param, conn_param->qp_num,
 					     conn_param->srq);
 
-	ret = write(id->channel->fd, &cmd, sizeof cmd);
+	/*ret = write(id->channel->fd, &cmd, sizeof cmd);
 	if (ret != sizeof cmd) {
 		ucma_modify_qp_err(id);
 		return (ret >= 0) ? ERR(ENODATA) : -1;
-	}
+	}*/
+
+	struct CM_ACCEPT_REQ req;
+	memset(&req, 0, sizeof req);
+	req.ec.fd = event_channel_map[id->channel->fd];
+	memcpy(&req.cmd, &cmd, sizeof cmd);
+
+	struct CM_ACCEPT_RSP rsp;
+	int rsp_size;
+	request_router(CM_ACCEPT, &req, &rsp, &rsp_size);
 
 	if (ucma_is_ud_qp(id->qp_type))
 		return 0;
@@ -1754,6 +2112,12 @@ int rdma_accept(struct rdma_cm_id *id, struct rdma_conn_param *conn_param)
 int rdma_reject(struct rdma_cm_id *id, const void *private_data,
 		uint8_t private_data_len)
 {
+	//if (PRINT_LOG)
+	//{
+		printf("@@@ rdma_reject @@@\n");
+		fflush(stdout);
+	//}
+
 	struct ucma_abi_reject cmd;
 	struct cma_id_private *id_priv;
 	int ret;
@@ -1776,6 +2140,12 @@ int rdma_reject(struct rdma_cm_id *id, const void *private_data,
 
 int rdma_notify(struct rdma_cm_id *id, enum ibv_event_type event)
 {
+	//if (PRINT_LOG)
+	//{
+		printf("@@@ rdma_notify @@@\n");
+		fflush(stdout);
+	//}
+
 	struct ucma_abi_notify cmd;
 	struct cma_id_private *id_priv;
 	int ret;
@@ -1806,6 +2176,12 @@ int ucma_shutdown(struct rdma_cm_id *id)
 
 int rdma_disconnect(struct rdma_cm_id *id)
 {
+	if (PRINT_LOG)
+	{
+		printf("### rdma_disconnect ###\n");
+		fflush(stdout);
+	}
+
 	struct ucma_abi_disconnect cmd;
 	struct cma_id_private *id_priv;
 	int ret;
@@ -1818,9 +2194,18 @@ int rdma_disconnect(struct rdma_cm_id *id)
 	id_priv = container_of(id, struct cma_id_private, id);
 	cmd.id = id_priv->handle;
 
-	ret = write(id->channel->fd, &cmd, sizeof cmd);
+	/*ret = write(id->channel->fd, &cmd, sizeof cmd);
 	if (ret != sizeof cmd)
-		return (ret >= 0) ? ERR(ENODATA) : -1;
+		return (ret >= 0) ? ERR(ENODATA) : -1;*/
+	
+	struct CM_DISCONNECT_REQ req;
+	memset(&req, 0, sizeof req);
+	req.ec.fd = event_channel_map[id->channel->fd];
+	memcpy(&req.cmd, &cmd, sizeof cmd);
+
+	struct CM_DISCONNECT_RSP rsp;
+	int rsp_size;
+	request_router(CM_DISCONNECT, &req, &rsp, &rsp_size);
 
 	return ucma_complete(id);
 }
@@ -1979,6 +2364,12 @@ static void ucma_complete_mc_event(struct cma_multicast *mc)
 
 int rdma_ack_cm_event(struct rdma_cm_event *event)
 {
+	if (PRINT_LOG)
+	{
+		printf("### rdma_ack_cm_event --> %s ###\n", rdma_event_str(event->event));
+		fflush(stdout);
+	}
+
 	struct cma_event *evt;
 
 	if (!event)
@@ -1991,11 +2382,24 @@ int rdma_ack_cm_event(struct rdma_cm_event *event)
 	else
 		ucma_complete_event(evt->id_priv);
 	free(evt);
+
+	if (PRINT_LOG)
+	{
+		printf("### rdma_ack_cm_event finished ###\n");
+		fflush(stdout);
+	}
+
 	return 0;
 }
 
 static void ucma_process_addr_resolved(struct cma_event *evt)
 {
+	if (PRINT_LOG)
+	{
+		printf("### ucma_process_addr_resolved ###\n");
+		fflush(stdout);
+	}
+
 	if (af_ib_support) {
 		evt->event.status = ucma_query_addr(&evt->id_priv->id);
 		if (!evt->event.status &&
@@ -2102,12 +2506,21 @@ static int ucma_process_conn_resp(struct cma_id_private *id_priv)
 	CMA_INIT_CMD(&cmd, sizeof cmd, ACCEPT);
 	cmd.id = id_priv->handle;
 
-	ret = write(id_priv->id.channel->fd, &cmd, sizeof cmd);
+	/*ret = write(id_priv->id.channel->fd, &cmd, sizeof cmd);
 	if (ret != sizeof cmd) {
 		ret = (ret >= 0) ? ERR(ENODATA) : -1;
 		goto err;
-	}
+	}*/
 
+	struct CM_UCMA_PROCESS_CONN_RESP_REQ req;
+	memset(&req, 0, sizeof req);
+	req.ec.fd = event_channel_map[id_priv->id.channel->fd];
+	memcpy(&req.cmd, &cmd, sizeof cmd);
+
+	struct CM_UCMA_PROCESS_CONN_RESP_RSP rsp;
+	int rsp_size;
+	request_router(CM_UCMA_PROCESS_CONN_RESP, &req, &rsp, &rsp_size);
+	
 	return 0;
 err:
 	ucma_modify_qp_err(&id_priv->id);
@@ -2167,6 +2580,12 @@ static void ucma_copy_ud_event(struct cma_event *event,
 int rdma_get_cm_event(struct rdma_event_channel *channel,
 		      struct rdma_cm_event **event)
 {
+	if (PRINT_LOG)
+	{
+		printf("### rdma_get_cm_event ###\n");
+		fflush(stdout);
+	}
+
 	struct ucma_abi_event_resp resp;
 	struct ucma_abi_get_event cmd;
 	struct cma_event *evt;
@@ -2185,14 +2604,30 @@ int rdma_get_cm_event(struct rdma_event_channel *channel,
 
 retry:
 	memset(evt, 0, sizeof *evt);
+
 	CMA_INIT_CMD_RESP(&cmd, sizeof cmd, GET_EVENT, &resp, sizeof resp);
-	ret = write(channel->fd, &cmd, sizeof cmd);
+
+	/*ret = write(channel->fd, &cmd, sizeof cmd);
 	if (ret != sizeof cmd) {
 		free(evt);
 		return (ret >= 0) ? ERR(ENODATA) : -1;
-	}
+	}*/
 	
-	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);
+	struct CM_GET_EVENT_REQ req;
+	memset(&req, 0, sizeof req);
+	req.ec.fd = event_channel_map[channel->fd];
+	memcpy(&req.cmd, &cmd, sizeof cmd);
+	
+	struct CM_GET_EVENT_RSP rsp;
+	int rsp_size;
+	request_router(CM_GET_EVENT, &req, &rsp, &rsp_size);
+	memcpy(&resp, &rsp.resp, sizeof(resp));
+
+	if (PRINT_LOG)
+	{
+		printf("[INFO] Get CM Event-->%s, resp.uid-->%d, rsp.resp.uid-->%d\n", rdma_event_str(resp.event), resp.uid, rsp.resp.uid);
+		fflush(stdout);
+	}
 
 	evt->event.event = resp.event;
 	/*
@@ -2219,6 +2654,12 @@ retry:
 	}
 	evt->event.id = &evt->id_priv->id;
 	evt->event.status = resp.status;
+
+	if (PRINT_LOG)
+	{
+		printf("[INFO] Get CM Event-->%s\n", rdma_event_str(resp.event));
+		fflush(stdout);
+	}
 
 	switch (resp.event) {
 	case RDMA_CM_EVENT_ADDR_RESOLVED:
@@ -2345,6 +2786,12 @@ const char *rdma_event_str(enum rdma_cm_event_type event)
 int rdma_set_option(struct rdma_cm_id *id, int level, int optname,
 		    void *optval, size_t optlen)
 {
+	if (PRINT_LOG)
+	{
+		printf("### rdma_set_option ###\n");
+		fflush(stdout);
+	}
+
 	struct ucma_abi_set_option cmd;
 	struct cma_id_private *id_priv;
 	int ret;
@@ -2357,15 +2804,32 @@ int rdma_set_option(struct rdma_cm_id *id, int level, int optname,
 	cmd.optname = optname;
 	cmd.optlen = optlen;
 
-	ret = write(id->channel->fd, &cmd, sizeof cmd);
+	/*ret = write(id->channel->fd, &cmd, sizeof cmd);
 	if (ret != sizeof cmd)
-		return (ret >= 0) ? ERR(ENODATA) : -1;
+		return (ret >= 0) ? ERR(ENODATA) : -1;*/
+
+	struct CM_SET_OPTION_REQ req;
+	memset(&req, 0, sizeof req);
+	req.ec.fd = event_channel_map[id->channel->fd];
+	memcpy(&req.cmd, &cmd, sizeof cmd);
+	memset(req.optval, 0, 100);
+	memcpy(req.optval, optval, optlen);
+
+	struct CM_SET_OPTION_RSP rsp;
+	int rsp_size;
+	request_router(CM_SET_OPTION, &req, &rsp, &rsp_size);
 
 	return 0;
 }
 
 int rdma_migrate_id(struct rdma_cm_id *id, struct rdma_event_channel *channel)
 {
+	if (PRINT_LOG)
+	{
+		printf("### rdma_migrate_id ###\n");
+		fflush(stdout);
+	}
+
 	struct ucma_abi_migrate_resp resp;
 	struct ucma_abi_migrate_id cmd;
 	struct cma_id_private *id_priv;
@@ -2383,16 +2847,26 @@ int rdma_migrate_id(struct rdma_cm_id *id, struct rdma_event_channel *channel)
 
 	CMA_INIT_CMD_RESP(&cmd, sizeof cmd, MIGRATE_ID, &resp, sizeof resp);
 	cmd.id = id_priv->handle;
-	cmd.fd = id->channel->fd;
+	cmd.fd = event_channel_map[id->channel->fd];
 
-	ret = write(channel->fd, &cmd, sizeof cmd);
+	/*ret = write(channel->fd, &cmd, sizeof cmd);
 	if (ret != sizeof cmd) {
 		if (sync)
 			rdma_destroy_event_channel(channel);
 		return (ret >= 0) ? ERR(ENODATA) : -1;
 	}
 
-	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);
+	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);*/
+
+	struct CM_MIGRATE_ID_REQ req;
+	memset(&req, 0, sizeof req);
+	req.ec.fd = event_channel_map[channel->fd];
+	memcpy(&req.cmd, &cmd, sizeof cmd);
+
+	struct CM_MIGRATE_ID_RSP rsp;
+	int rsp_size;
+	request_router(CM_MIGRATE_ID, &req, &rsp, &rsp_size);
+	memcpy(&resp, &rsp.resp, sizeof resp);
 
 	if (id_priv->sync) {
 		if (id->event) {

@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2007 Cisco, Inc.  All rights reserved.
+ * Copyright (c) Microsoft Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -348,12 +349,12 @@ struct ibv_qp *mlx4_exp_create_qp(struct ibv_context *context,
 	}
 
 	/* Sanity check QP size before proceeding */
-	if (verify_sizes(attr, to_mctx(context)))
+	/*if (verify_sizes(attr, to_mctx(context)))
 		return NULL;
 
 	if (attr->qp_type == IBV_QPT_XRC && attr->recv_cq &&
 		attr->cap.max_recv_wr > 0 && mlx4_trace)
-		fprintf(stderr, PFX "Warning: Legacy XRC sender should not use a recieve cq\n");
+		fprintf(stderr, PFX "Warning: Legacy XRC sender should not use a recieve cq\n");*/
 
 	qp = calloc(1, sizeof(*qp));
 	if (!qp)

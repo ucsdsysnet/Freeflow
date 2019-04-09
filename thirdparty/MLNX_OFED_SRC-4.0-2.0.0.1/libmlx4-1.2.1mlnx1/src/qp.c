@@ -2,6 +2,7 @@
  * Copyright (c) 2005 Topspin Communications.  All rights reserved.
  * Copyright (c) 2005 Mellanox Technologies Ltd.  All rights reserved.
  * Copyright (c) 2007 Cisco, Inc.  All rights reserved.
+ * Copyright (c) Microsoft Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -1038,86 +1039,7 @@ void mlx4_update_post_send_one(struct mlx4_qp *qp)
 int mlx4_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
 		     struct ibv_send_wr **bad_wr)
 {
-	struct mlx4_qp *qp = to_mqp(ibqp);
-	void *uninitialized_var(ctrl);
-	unsigned int ind;
-	int nreq;
-	int inl = 0;
-	int ret = 0;
-	int size = 0;
-
-	mlx4_lock(&qp->sq.lock);
-
-	/* XXX check that state is OK to post send */
-
-	ind = qp->sq.head;
-
-	for (nreq = 0; wr; ++nreq, wr = wr->next) {
-		/* to be considered whether can throw first check, create_qp_exp with post_send */
-		if (!(qp->create_flags & IBV_EXP_QP_CREATE_IGNORE_SQ_OVERFLOW))
-			if (unlikely(wq_overflow(&qp->sq, nreq, qp))) {
-				ret = ENOMEM;
-				errno = ret;
-				*bad_wr = wr;
-				goto out;
-			}
-
-		if (unlikely(wr->num_sge > qp->sq.max_gs)) {
-			ret = ENOMEM;
-			errno = ret;
-			*bad_wr = wr;
-			goto out;
-		}
-
-		if (unlikely(wr->opcode >= sizeof(mlx4_ib_opcode) / sizeof(mlx4_ib_opcode[0]))) {
-			ret = EINVAL;
-			errno = ret;
-			*bad_wr = wr;
-			goto out;
-		}
-
-		ctrl = get_send_wqe(qp, ind & (qp->sq.wqe_cnt - 1));
-		qp->sq.wrid[ind & (qp->sq.wqe_cnt - 1)] = wr->wr_id;
-
-		ret = qp->post_send_one(wr, qp, ctrl, &size, &inl, ind);
-		if (unlikely(ret)) {
-			inl = 0;
-			errno = ret;
-			*bad_wr = wr;
-			goto out;
-		}
-		/*
-		 * We can improve latency by not stamping the last
-		 * send queue WQE until after ringing the doorbell, so
-		 * only stamp here if there are still more WQEs to post.
-		 */
-		if (likely(wr->next))
-#ifndef MLX4_WQE_FORMAT
-			stamp_send_wqe(qp, (ind + qp->sq_spare_wqes) &
-				       (qp->sq.wqe_cnt - 1));
-#else
-			/* Make sure all owners bits are set to HW ownership */
-			set_owner_wqe(qp, ind, size,
-				      ((ind & qp->sq.wqe_cnt) ? htonl(WQE_CTRL_OWN) : 0));
-#endif
-
-		++ind;
-	}
-
-out:
-	ring_db(qp, ctrl, nreq, size, inl);
-
-	if (likely(nreq))
-#ifndef MLX4_WQE_FORMAT
-		stamp_send_wqe(qp, (ind + qp->sq_spare_wqes - 1) &
-			       (qp->sq.wqe_cnt - 1));
-#else
-		set_owner_wqe(qp, ind - 1, size,
-			      ((ind - 1) & qp->sq.wqe_cnt ? htonl(WQE_CTRL_OWN) : 0));
-#endif
-	mlx4_unlock(&qp->sq.lock);
-
-	return ret;
+	return ibv_cmd_post_send(ibqp, wr, bad_wr);
 }
 
 int mlx4_exp_post_send(struct ibv_qp *ibqp, struct ibv_exp_send_wr *wr,
@@ -1465,74 +1387,7 @@ out:
 int mlx4_post_recv(struct ibv_qp *ibqp, struct ibv_recv_wr *wr,
 		   struct ibv_recv_wr **bad_wr)
 {
-	struct mlx4_qp *qp = to_mqp(ibqp);
-	struct mlx4_wqe_data_seg *scat;
-	int ret = 0;
-	int nreq;
-	unsigned int ind;
-	int i;
-	struct mlx4_inlr_rbuff *rbuffs;
-
-	mlx4_lock(&qp->rq.lock);
-
-	/* XXX check that state is OK to post receive */
-	ind = qp->rq.head & (qp->rq.wqe_cnt - 1);
-
-	for (nreq = 0; wr; ++nreq, wr = wr->next) {
-		if (unlikely(!(qp->create_flags & IBV_EXP_QP_CREATE_IGNORE_RQ_OVERFLOW) &&
-			wq_overflow(&qp->rq, nreq, qp))) {
-			ret = ENOMEM;
-			*bad_wr = wr;
-			goto out;
-		}
-
-		if (unlikely(wr->num_sge > qp->rq.max_gs)) {
-			ret = EINVAL;
-			*bad_wr = wr;
-			goto out;
-		}
-
-		scat = get_recv_wqe(qp, ind);
-
-		for (i = 0; i < wr->num_sge; ++i)
-			__set_data_seg(scat + i, wr->sg_list + i);
-
-		if (likely(i < qp->rq.max_gs)) {
-			scat[i].byte_count = 0;
-			scat[i].lkey       = htonl(MLX4_INVALID_LKEY);
-			scat[i].addr       = 0;
-		}
-		if (qp->max_inlr_sg) {
-			rbuffs = qp->inlr_buff.buff[ind].sg_list;
-			qp->inlr_buff.buff[ind].list_len = wr->num_sge;
-			for (i = 0; i < wr->num_sge; ++i) {
-				rbuffs->rbuff = (void *)(unsigned long)(wr->sg_list[i].addr);
-				rbuffs->rlen = wr->sg_list[i].length;
-				rbuffs++;
-			}
-		}
-
-		qp->rq.wrid[ind] = wr->wr_id;
-
-		ind = (ind + 1) & (qp->rq.wqe_cnt - 1);
-	}
-
-out:
-	if (likely(nreq)) {
-		qp->rq.head += nreq;
-
-		/*
-		 * Make sure that descriptors are written before
-		 * doorbell record.
-		 */
-		wmb();
-
-		*qp->db = htonl(qp->rq.head & 0xffff);
-	}
-
-	mlx4_unlock(&qp->rq.lock);
-
-	return ret;
+	return ibv_cmd_post_recv(ibqp, wr, bad_wr);
 }
 
 int num_inline_segs(int data, enum ibv_qp_type type)
@@ -1720,7 +1575,12 @@ void mlx4_clear_qp(struct mlx4_context *ctx, uint32_t qpn)
 	if (!--ctx->qp_table[tind].refcnt)
 		free(ctx->qp_table[tind].table);
 	else
+	{	
+		//[TODO] 
+                printf("tind = %d, qpn = %d, ctx->qp_table_mask = %d\n", tind, qpn, ctx->qp_table_mask);
+                fflush(stdout);
 		ctx->qp_table[tind].table[qpn & ctx->qp_table_mask] = NULL;
+	}
 }
 
 int mlx4_post_task(struct ibv_context *context,

@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2005 Topspin Communications.  All rights reserved.
  * Copyright (c) 2006, 2007 Cisco Systems, Inc.  All rights reserved.
+ * Copyright (c) Microsoft Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -42,7 +43,25 @@
 #include <alloca.h>
 #include <string.h>
 
+#include <sys/shm.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <errno.h>
+#include <semaphore.h>
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <semaphore.h>
+#include <time.h>
+#include <sys/time.h>
+#include <unistd.h>
+
 #include "ibverbs.h"
+#include "infiniband/freeflow.h"
+#include "infiniband/freeflow-types.h"
 
 
 /*
@@ -53,6 +72,9 @@ int ibv_exp_cmd_query_device(struct ibv_context *context,
 			     uint64_t *raw_fw_ver,
 			     struct ibv_exp_query_device *cmd, size_t cmd_size)
 {
+	printf("@@@ ibv_exp_cmd_query_device @@@\n");
+	fflush(stdout);
+
 	struct ibv_exp_query_device_resp resp;
 	struct ibv_query_device_resp *r_resp;
 	uint32_t comp_mask = 0;
@@ -66,8 +88,18 @@ int ibv_exp_cmd_query_device(struct ibv_context *context,
 	cmd->comp_mask = device_attr->comp_mask;
 	IBV_INIT_CMD_RESP_EXP(QUERY_DEVICE, cmd, cmd_size, 0,
 			      &resp, sizeof(resp), 0);
-	if (write(context->cmd_fd, cmd, cmd_size) != cmd_size)
-		return errno;
+
+	/*if (write(context->cmd_fd, cmd, cmd_size) != cmd_size)
+		return errno;*/
+
+        struct IBV_EXP_QUERY_DEV_REQ req_body;
+        struct IBV_EXP_QUERY_DEV_RSP rsp;
+        int rsp_size;
+
+	memcpy(&req_body.cmd, cmd, cmd_size);
+        request_router(IBV_EXP_QUERY_DEV, &req_body, &rsp, &rsp_size);
+	memcpy(&resp, &rsp.resp, sizeof resp);
+
 
 	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof(resp));
 	memset(device_attr->fw_ver, 0, sizeof(device_attr->fw_ver));
@@ -265,6 +297,112 @@ int ibv_exp_cmd_create_qp(struct ibv_context *context,
 			  void *resp_buf, size_t lib_resp_size, size_t drv_resp_size,
 			  int force_exp)
 {
+	if (PRINT_LOG)
+	{
+		printf("@@@ ibv_exp_cmd_create_qp @@@\n");
+		fflush(stdout);
+	}
+	
+        struct IBV_CREATE_QP_REQ req_body;
+
+        req_body.pd_handle = attr_exp->pd->handle;
+        req_body.qp_type = attr_exp->qp_type;
+
+	if (PRINT_LOG)
+	{
+		printf("pd_hanele: %d, qp_type: %d\n", req_body.pd_handle, req_body.qp_type);
+		fflush(stdout);
+	}
+	
+        req_body.sq_sig_all = attr_exp->sq_sig_all;
+        req_body.send_cq_handle = attr_exp->send_cq->handle;
+        req_body.recv_cq_handle = attr_exp->recv_cq->handle;
+        req_body.srq_handle = attr_exp->srq ? attr_exp->srq->handle : 0;
+        req_body.cap.max_recv_sge    = attr_exp->cap.max_recv_sge;
+        req_body.cap.max_send_sge    = attr_exp->cap.max_send_sge;
+        req_body.cap.max_recv_wr     = attr_exp->cap.max_recv_wr;
+        req_body.cap.max_send_wr     = attr_exp->cap.max_send_wr;
+        req_body.cap.max_inline_data = attr_exp->cap.max_inline_data;
+
+        struct IBV_CREATE_QP_RSP rsp;
+        int rsp_size;
+        request_router(IBV_CREATE_QP, &req_body, &rsp, &rsp_size);
+
+        if (abi_ver > 3) {
+                attr_exp->cap.max_recv_sge    = rsp.cap.max_recv_sge;
+                attr_exp->cap.max_send_sge    = rsp.cap.max_send_sge;
+                attr_exp->cap.max_recv_wr     = rsp.cap.max_recv_wr;
+                attr_exp->cap.max_send_wr     = rsp.cap.max_send_wr;
+                attr_exp->cap.max_inline_data = rsp.cap.max_inline_data;
+        }
+
+        qp->qp.handle                = rsp.handle;
+        qp->qp.qp_num                = rsp.qp_num;
+
+	if (PRINT_LOG)
+	{
+		printf("create qp: qp_num=%d, handle=%d\n", qp->qp.qp_num, qp->qp.handle);
+		fflush(stdout);
+	}
+
+        qp->qp.context               = context;
+
+	qp->qp.qp_context	= attr_exp->qp_context;
+	qp->qp.pd		= attr_exp->pd;
+	qp->qp.send_cq		= attr_exp->send_cq;
+	qp->qp.recv_cq		= attr_exp->recv_cq;
+	qp->qp.srq		= attr_exp->srq;
+	qp->qp.qp_type		= attr_exp->qp_type;
+	qp->qp.state		= IBV_QPS_RESET;
+	qp->qp.events_completed = 0;
+	pthread_mutex_init(&qp->qp.mutex, NULL);
+	pthread_cond_init(&qp->qp.cond, NULL);
+
+	qp->comp_mask = 0;
+
+	// patch SRQ
+	if (qp->qp.srq) {
+		map_cq_to_srq[qp->qp.recv_cq->handle] = qp->qp.srq->handle;
+	}
+	/*
+	else {
+		map_cq_to_srq[qp->qp.recv_cq->handle] = MAP_SIZE + 1;
+	}
+	if (qp->qp.send_cq->handle != qp->qp.recv_cq->handle) {
+		map_cq_to_srq[qp->qp.send_cq->handle] = MAP_SIZE + 1;
+	}
+	*/
+	int fd = shm_open(rsp.shm_name, O_CREAT | O_RDWR, 0666);
+	if (ftruncate(fd, sizeof(struct CtrlShmPiece))) {
+		printf("[Error] Fail to mount shm %s\n", rsp.shm_name);
+		fflush(stdout);
+	}
+	void* shm_p = mmap(0, sizeof(struct CtrlShmPiece), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        
+        if (!shm_p)
+	{
+		printf("[Error] Fail to mount shm %s\n", rsp.shm_name);
+		fflush(stdout);
+	}
+        else
+	{
+		printf("[INFO] Succeed to mount shm %s\n", rsp.shm_name);
+		fflush(stdout);
+	}
+
+	qp_shm_map[qp->qp.handle] = (struct CtrlShmPiece *)shm_p;
+	pthread_mutex_init(&(qp_shm_mtx_map[qp->qp.handle]), NULL); 
+
+	return 0;
+}
+
+/*int ibv_exp_cmd_create_qp(struct ibv_context *context,
+			  struct verbs_qp *qp, int vqp_sz,
+			  struct ibv_exp_qp_init_attr *attr_exp,
+			  void *cmd_buf, size_t lib_cmd_size, size_t drv_cmd_size,
+			  void *resp_buf, size_t lib_resp_size, size_t drv_resp_size,
+			  int force_exp)
+{
 	struct verbs_xrcd *vxrcd = NULL;
 	struct ibv_exp_create_qp	*cmd_exp = NULL;
 	struct ibv_exp_create_qp_resp	*resp_exp = NULL;
@@ -278,22 +416,22 @@ int ibv_exp_cmd_create_qp(struct ibv_context *context,
 	cmd = cmd_buf;
 	resp = resp_buf;
 
-	if (attr_exp->comp_mask >= IBV_EXP_QP_INIT_ATTR_CREATE_FLAGS || force_exp) {
+	if (0) { //(attr_exp->comp_mask >= IBV_EXP_QP_INIT_ATTR_CREATE_FLAGS || force_exp) {
 		cmd_exp = cmd_buf;
 		resp_exp = resp_buf;
 		wsize = lib_cmd_size + drv_cmd_size;
 
-		/*
-		 * Cast extended command to legacy command using a fact
-		 * that legacy header size is equal 'comp_mask' field size
-		 * and 'comp_mask' field position is on top of the valuable
-		 * fields
-		 */
+		//
+		// Cast extended command to legacy command using a fact
+		// that legacy header size is equal 'comp_mask' field size
+		// and 'comp_mask' field position is on top of the valuable
+		// fields
+		//
 		cmd = (struct ibv_create_qp *)((void *)&cmd_exp->comp_mask - sizeof(cmd->response));
-		/*
-		 * Cast extended response to legacy response using a fact
-		 * that 'comp_mask' field is added on top of legacy response
-		 */
+		//
+		// Cast extended response to legacy response using a fact
+		// that 'comp_mask' field is added on top of legacy response
+		//
 		resp = (struct ibv_create_qp_resp *)
 				((uint8_t *)resp_exp +
 					sizeof(resp_exp->comp_mask));
@@ -308,7 +446,7 @@ int ibv_exp_cmd_create_qp(struct ibv_context *context,
 	cmd->user_handle     = (uintptr_t) qp;
 
 	if (attr_exp->comp_mask & IBV_EXP_QP_INIT_ATTR_XRCD) {
-		/* XRC reciever side */
+		// XRC reciever side 
 		vxrcd = container_of(attr_exp->xrcd, struct verbs_xrcd, xrcd);
 		cmd->pd_handle	= vxrcd->handle;
 	} else {
@@ -318,7 +456,7 @@ int ibv_exp_cmd_create_qp(struct ibv_context *context,
 		cmd->pd_handle	= attr_exp->pd->handle;
 		if (!(attr_exp->comp_mask & IBV_EXP_QP_INIT_ATTR_RX_HASH))
 			cmd->send_cq_handle = attr_exp->send_cq->handle;
-		/* XRC sender doesn't have a recieve cq */
+		// XRC sender doesn't have a recieve cq 
 		if (attr_exp->qp_type != IBV_QPT_XRC_SEND &&
 			attr_exp->qp_type != IBV_QPT_XRC &&
 			attr_exp->qp_type != IBV_EXP_QPT_DC_INI &&
@@ -373,7 +511,7 @@ int ibv_exp_cmd_create_qp(struct ibv_context *context,
 				return -EINVAL;
 			}
 			cmd_exp->qpg.qpg_type = qpg->qpg_type;
-			/* request a QP group */
+			// request a QP group 
 			cmd_exp->comp_mask |= IBV_EXP_CREATE_QP_QPG;
 		}
 
@@ -392,7 +530,7 @@ int ibv_exp_cmd_create_qp(struct ibv_context *context,
 			       attr_exp->rx_hash_conf->rx_hash_key_len);
 			cmd_exp->rx_hash_info.rwq_ind_tbl_handle = attr_exp->rx_hash_conf->rwq_ind_tbl->ind_tbl_handle;
 			cmd_exp->rx_hash_info.reserved = 0;
-			/* no comp mask explicit bit is needed, hash function is used as an indicator */
+			/ no comp mask explicit bit is needed, hash function is used as an indicator
 		}
 		if (attr_exp->comp_mask & IBV_EXP_QP_INIT_ATTR_PORT)
 			cmd_exp->port_num = attr_exp->port_num;
@@ -458,7 +596,7 @@ int ibv_exp_cmd_create_qp(struct ibv_context *context,
 	}
 
 	return 0;
-}
+}*/
 
 int ibv_exp_cmd_create_dct(struct ibv_context *context,
 			   struct ibv_exp_dct *dct,
@@ -468,6 +606,10 @@ int ibv_exp_cmd_create_dct(struct ibv_context *context,
 			   struct ibv_exp_create_dct_resp *resp,
 			   size_t lib_resp_sz, size_t drv_resp_sz)
 {
+	printf("@@@ ibv_exp_cmd_create_dct @@@\n");
+	fflush(stdout);
+
+
 	int wsize = lib_cmd_sz + drv_cmd_sz;
 
 	IBV_INIT_CMD_RESP_EXP(CREATE_DCT, cmd, lib_cmd_sz, drv_cmd_sz, resp,
@@ -515,6 +657,10 @@ int ibv_exp_cmd_destroy_dct(struct ibv_context *context,
 			    struct ibv_exp_destroy_dct_resp *resp,
 			    size_t lib_resp_sz, size_t drv_resp_sz)
 {
+	printf("@@@ ibv_exp_cmd_destroy_dct @@@\n");
+	fflush(stdout);
+
+
 	int wsize = lib_cmd_sz + drv_cmd_sz;
 
 	IBV_INIT_CMD_RESP_EXP(DESTROY_DCT, cmd, lib_cmd_sz, drv_cmd_sz, resp, lib_resp_sz, drv_resp_sz);
@@ -539,6 +685,11 @@ int ibv_exp_cmd_query_dct(struct ibv_context *context,
 			  size_t lib_resp_sz, size_t drv_resp_sz,
 			  struct ibv_exp_dct_attr *attr)
 {
+
+	printf("@@@ ibv_exp_cmd_query_dct @@@\n");
+	fflush(stdout);
+
+
 	int wsize = lib_cmd_sz + drv_cmd_sz;
 
 	IBV_INIT_CMD_RESP_EXP(QUERY_DCT, cmd, lib_cmd_sz, drv_cmd_sz, resp, lib_resp_sz, drv_resp_sz);
@@ -570,6 +721,11 @@ int ibv_exp_cmd_arm_dct(struct ibv_context *context,
 			struct ibv_exp_arm_dct_resp *resp,
 			size_t lib_resp_sz, size_t drv_resp_sz)
 {
+	printf("@@@ ibv_exp_cmd_arm_dct @@@\n");
+	fflush(stdout);
+
+
+
 	int wsize = lib_cmd_sz + drv_cmd_sz;
 
 	if (attr->comp_mask) {
@@ -590,6 +746,11 @@ int ibv_exp_cmd_modify_cq(struct ibv_cq *cq,
 			  int attr_mask,
 			  struct ibv_exp_modify_cq *cmd, size_t cmd_size)
 {
+	printf("@@@ ibv_exp_cmd_modify_cq @@@\n");
+	fflush(stdout);
+
+
+
 	IBV_INIT_CMD_EXP(MODIFY_CQ, cmd, cmd_size, 0);
 
 	if (attr->comp_mask >= IBV_EXP_CQ_ATTR_RESERVED)
@@ -616,6 +777,11 @@ int ibv_exp_cmd_modify_qp(struct ibv_qp *qp, struct ibv_exp_qp_attr *attr,
 			  uint64_t exp_attr_mask, struct ibv_exp_modify_qp *cmd,
 			  size_t cmd_size)
 {
+	printf("@@@ ibv_exp_cmd_modify_qp @@@\n");
+	fflush(stdout);
+
+
+
 	if (attr->comp_mask >= IBV_EXP_QP_ATTR_RESERVED)
 		return ENOSYS;
 
@@ -680,8 +846,9 @@ int ibv_exp_cmd_modify_qp(struct ibv_qp *qp, struct ibv_exp_qp_attr *attr,
 	cmd->reserved[1]	    = 0;
 	cmd->comp_mask		    = attr->comp_mask;
 
-	if (write(qp->context->cmd_fd, cmd, cmd_size) != cmd_size)
-		return errno;
+	/*if (write(qp->context->cmd_fd, cmd, cmd_size) != cmd_size)
+		return errno;*/
+	
 
 	if (exp_attr_mask & IBV_EXP_QP_STATE)
 		qp->state = attr->qp_state;
@@ -696,6 +863,11 @@ int ibv_exp_cmd_create_cq(struct ibv_context *context, int cqe,
 			  struct ibv_create_cq_resp *resp, size_t lib_resp_sz, size_t drv_resp_sz,
 			  struct ibv_exp_cq_init_attr *attr)
 {
+	printf("@@@ ibv_exp_cmd_create_cq @@@\n");
+	fflush(stdout);
+
+
+
 	int wsize = lib_cmd_sz + drv_cmd_sz;
 
 	IBV_INIT_CMD_RESP_EXP(CREATE_CQ, cmd, lib_cmd_sz, drv_cmd_sz, resp,
@@ -740,6 +912,11 @@ int ibv_exp_cmd_create_mr(struct ibv_exp_create_mr_in *in,
 			  size_t lib_resp_sz,
 			  size_t drv_resp_sz)
 {
+	printf("@@@ ibv_exp_cmd_create_mr @@@\n");
+	fflush(stdout);
+
+
+
 	struct ibv_pd *pd = in->pd;
 	struct ibv_context *context = pd->context;
 	struct ibv_exp_mr_init_attr *mr_init_attr = &in->attr;
@@ -776,6 +953,11 @@ int ibv_exp_cmd_query_mkey(struct ibv_context *context,
 			   struct ibv_exp_query_mkey_resp *resp,
 			   size_t lib_resp_sz, size_t drv_resp_sz)
 {
+
+	printf("@@@ ibv_exp_cmd_query_mkey @@@\n");
+	fflush(stdout);
+
+
 	int wsize = lib_cmd_sz + drv_cmd_sz;
 
 	IBV_INIT_CMD_RESP_EXP(QUERY_MKEY, cmd, lib_cmd_sz, drv_cmd_sz, resp,
@@ -805,6 +987,11 @@ int ibv_cmd_exp_reg_mr(
 	struct ibv_exp_reg_mr_resp *resp,
 	size_t resp_size)
 {
+
+	printf("@@@ ibv_exp_cmd_reg_mr @@@\n");
+	fflush(stdout);
+
+
 	struct ibv_pd *pd = mr_init_attr->pd;
 
 	if (mr_init_attr->comp_mask >= IBV_EXP_REG_MR_RESERVED)
@@ -836,6 +1023,11 @@ int ibv_cmd_exp_reg_mr(
 int ibv_cmd_exp_prefetch_mr(struct ibv_mr *mr,
 		struct ibv_exp_prefetch_attr *attr)
 {
+
+	printf("@@@ ibv_exp_cmd_prefetch_mr @@@\n");
+	fflush(stdout);
+
+
 	struct ibv_exp_prefetch_mr cmd;
 
 	IBV_INIT_CMD_EXP(PREFETCH_MR, &cmd, sizeof(cmd), 0);
@@ -868,6 +1060,11 @@ int ibv_exp_cmd_create_wq(struct ibv_context *context,
 			  size_t resp_core_size,
 			  size_t resp_size)
 {
+
+	printf("@@@ ibv_exp_cmd_create_wq @@@\n");
+	fflush(stdout);
+
+
 	int err;
 
 	IBV_INIT_CMD_RESP_EX_V(cmd, cmd_core_size, cmd_size,
@@ -907,6 +1104,12 @@ int ibv_exp_cmd_create_wq(struct ibv_context *context,
 int ibv_exp_cmd_modify_wq(struct ibv_exp_wq *wq, struct ibv_exp_wq_attr *attr,
 			  struct ib_exp_modify_wq *cmd, size_t cmd_size)
 {
+
+	printf("@@@ ibv_exp_cmd_modify_wq @@@\n");
+	fflush(stdout);
+
+
+
 	IBV_INIT_CMD_EX(cmd, cmd_size, EXP_MODIFY_WQ);
 
 	cmd->curr_wq_state = attr->curr_wq_state;
@@ -928,6 +1131,11 @@ int ibv_exp_cmd_modify_wq(struct ibv_exp_wq *wq, struct ibv_exp_wq_attr *attr,
 
 int ibv_exp_cmd_destroy_wq(struct ibv_exp_wq *wq)
 {
+	printf("@@@ ibv_exp_cmd_destroy_wq @@@\n");
+	fflush(stdout);
+
+
+
 	struct ib_exp_destroy_wq cmd;
 	struct ibv_destroy_wq_resp resp;
 	int ret = 0;
@@ -953,6 +1161,12 @@ int ibv_exp_cmd_create_rwq_ind_table(struct ibv_context *context,
 				     size_t resp_core_size,
 				     size_t resp_size)
 {
+
+	printf("@@@ ibv_exp_create_rwq_ind_table @@@\n");
+	fflush(stdout);
+
+
+
 	int err, i;
 	uint32_t required_tbl_size, alloc_tbl_size;
 	uint32_t *tbl_start;
@@ -996,6 +1210,11 @@ int ibv_exp_cmd_create_rwq_ind_table(struct ibv_context *context,
 
 int ibv_exp_cmd_destroy_rwq_ind_table(struct ibv_exp_rwq_ind_table *rwq_ind_table)
 {
+
+	printf("@@@ ibv_exp_destroy_rwq_ind_table @@@\n");
+	fflush(stdout);
+
+
 	struct ibv_exp_destroy_rwq_ind_table cmd;
 	int ret = 0;
 

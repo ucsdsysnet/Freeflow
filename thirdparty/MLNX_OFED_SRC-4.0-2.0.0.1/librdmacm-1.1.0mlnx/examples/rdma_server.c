@@ -41,8 +41,11 @@ static char *port = "7471";
 struct rdma_cm_id *listen_id, *id;
 struct ibv_mr *mr, *send_mr;
 int send_flags;
-uint8_t send_msg[16];
-uint8_t recv_msg[16];
+//uint8_t send_msg[16];
+//uint8_t recv_msg[16];
+uint8_t *send_msg;
+uint8_t *recv_msg;
+
 
 static int run(void)
 {
@@ -93,19 +96,19 @@ static int run(void)
 		goto out_destroy_accept_ep;
 	}
 	if (init_attr.cap.max_inline_data >= 16)
-		send_flags = IBV_SEND_INLINE;
+		;//send_flags = IBV_SEND_INLINE;
 	else
 		printf("rdma_server: device doesn't support IBV_SEND_INLINE, "
 		       "using sge sends\n");
 
-	mr = rdma_reg_msgs(id, recv_msg, 16);
+	mr = rdma_reg_msgs_ff(id, &recv_msg, 16);
 	if (!mr) {
 		ret = -1;
 		perror("rdma_reg_msgs for recv_msg");
 		goto out_destroy_accept_ep;
 	}
 	if ((send_flags & IBV_SEND_INLINE) == 0) {
-		send_mr = rdma_reg_msgs(id, send_msg, 16);
+		send_mr = rdma_reg_msgs_ff(id, &send_msg, 16);
 		if (!send_mr) {
 			ret = -1;
 			perror("rdma_reg_msgs for send_msg");

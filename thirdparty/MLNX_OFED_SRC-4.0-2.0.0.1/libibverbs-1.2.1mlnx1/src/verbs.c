@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2005 Topspin Communications.  All rights reserved.
  * Copyright (c) 2006, 2007 Cisco Systems, Inc.  All rights reserved.
+ * Copyright (c) Microsoft Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -47,9 +48,15 @@
 
 #include "ibverbs.h"
 #include "infiniband/verbs_exp.h"
+#include "infiniband/freeflow-types.h"
+#include "infiniband/freeflow.h"
 #ifndef NRESOLVE_NEIGH
 #include "neigh.h"
 #endif
+
+#define MAP_SIZE 10240
+static int cq_map_init = 0;
+static struct ibv_cq *cq_map[MAP_SIZE];
 
 int ibv_rate_to_mult(enum ibv_rate rate)
 {
@@ -134,6 +141,16 @@ enum ibv_rate mbps_to_ibv_rate(int mbps)
 int __ibv_query_device(struct ibv_context *context,
 		       struct ibv_device_attr *device_attr)
 {
+	int i = 0;
+	if (cq_map_init == 0)
+	{
+		for (i = 0; i < MAP_SIZE; i++)
+		{
+			cq_map[i] = NULL;
+		}
+		cq_map_init = 1;
+	}
+
 	return context->ops.query_device(context, device_attr);
 }
 default_symver(__ibv_query_device, ibv_query_device);
@@ -401,7 +418,7 @@ int __ibv_dereg_mr(struct ibv_mr *mr)
 }
 default_symver(__ibv_dereg_mr, ibv_dereg_mr);
 
-static struct ibv_comp_channel *ibv_create_comp_channel_v2(struct ibv_context *context)
+/*static struct ibv_comp_channel *ibv_create_comp_channel_v2(struct ibv_context *context)
 {
 	struct ibv_abi_compat_v2 *t = context->abi_compat;
 	static int warned;
@@ -417,11 +434,11 @@ static struct ibv_comp_channel *ibv_create_comp_channel_v2(struct ibv_context *c
 	}
 
 	return NULL;
-}
+}*/
 
 struct ibv_comp_channel *ibv_create_comp_channel(struct ibv_context *context)
 {
-	struct ibv_comp_channel            *channel;
+	/*struct ibv_comp_channel            *channel;
 	struct ibv_create_comp_channel      cmd;
 	struct ibv_create_comp_channel_resp resp;
 
@@ -438,25 +455,31 @@ struct ibv_comp_channel *ibv_create_comp_channel(struct ibv_context *context)
 		return NULL;
 	}
 
-	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);
+	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);*/
+
+	struct ibv_comp_channel *channel = malloc(sizeof(struct ibv_comp_channel));
+
+	struct IBV_CREATE_COMP_CHANNEL_RSP rsp;
+	int rsp_size;
+	request_router(IBV_CREATE_COMP_CHANNEL, NULL, &rsp, &rsp_size);
 
 	channel->context = context;
-	channel->fd      = resp.fd;
+	channel->fd      = rsp.fd;
 	channel->refcnt  = 0;
 
 	return channel;
 }
 
-static int ibv_destroy_comp_channel_v2(struct ibv_comp_channel *channel)
+/*static int ibv_destroy_comp_channel_v2(struct ibv_comp_channel *channel)
 {
 	struct ibv_abi_compat_v2 *t = (struct ibv_abi_compat_v2 *) channel;
 	pthread_mutex_unlock(&t->in_use);
 	return 0;
-}
+}*/
 
 int ibv_destroy_comp_channel(struct ibv_comp_channel *channel)
 {
-	struct ibv_context *context;
+	/*struct ibv_context *context;
 	int ret;
 
 	context = channel->context;
@@ -479,7 +502,16 @@ int ibv_destroy_comp_channel(struct ibv_comp_channel *channel)
 out:
 	pthread_mutex_unlock(&context->mutex);
 
-	return ret;
+	return ret;*/
+
+	struct IBV_DESTROY_COMP_CHANNEL_REQ req;
+	req.fd = comp_channel_map[channel->fd];
+
+	struct IBV_DESTROY_COMP_CHANNEL_RSP rsp;
+	int rsp_size;
+	request_router(IBV_DESTROY_COMP_CHANNEL, &req, &rsp, &rsp_size);
+
+	return rsp.ret;
 }
 
 struct ibv_cq *__ibv_create_cq(struct ibv_context *context, int cqe, void *cq_context,
@@ -503,6 +535,7 @@ struct ibv_cq *__ibv_create_cq(struct ibv_context *context, int cqe, void *cq_co
 		pthread_cond_init(&cq->cond, NULL);
 	}
 
+	cq_map[cq->handle] = cq;
 	pthread_mutex_unlock(&context->mutex);
 
 	return cq;
@@ -523,6 +556,7 @@ int __ibv_destroy_cq(struct ibv_cq *cq)
 	struct ibv_comp_channel *channel = cq->channel;
 	int ret;
 
+	int cq_handle = cq->handle;
 	if (channel)
 		pthread_mutex_lock(&channel->context->mutex);
 
@@ -534,6 +568,7 @@ int __ibv_destroy_cq(struct ibv_cq *cq)
 		pthread_mutex_unlock(&channel->context->mutex);
 	}
 
+	cq_map[cq_handle] = NULL;
 	return ret;
 }
 default_symver(__ibv_destroy_cq, ibv_destroy_cq);
@@ -541,12 +576,28 @@ default_symver(__ibv_destroy_cq, ibv_destroy_cq);
 int __ibv_get_cq_event(struct ibv_comp_channel *channel,
 		       struct ibv_cq **cq, void **cq_context)
 {
-	struct ibv_comp_event ev;
+	/*struct ibv_comp_event ev;
 
 	if (read(channel->fd, &ev, sizeof ev) != sizeof ev)
 		return -1;
 
 	*cq         = (struct ibv_cq *) (uintptr_t) ev.cq_handle;
+	*cq_context = (*cq)->cq_context;
+
+	if ((*cq)->context->ops.cq_event)
+		(*cq)->context->ops.cq_event(*cq);
+
+	return 0;*/
+	struct IBV_GET_CQ_EVENT_REQ req;
+	req.fd = comp_channel_map[channel->fd];
+
+	struct IBV_GET_CQ_EVENT_RSP rsp;
+	int rsp_size;
+	request_router(IBV_GET_CQ_EVENT, &req, &rsp, &rsp_size);
+
+	*cq = cq_map[rsp.cq_handle];
+	(*cq)->comp_events_completed = rsp.comp_events_completed;
+	(*cq)->async_events_completed = rsp.async_events_completed;
 	*cq_context = (*cq)->cq_context;
 
 	if ((*cq)->context->ops.cq_event)
@@ -558,8 +609,16 @@ default_symver(__ibv_get_cq_event, ibv_get_cq_event);
 
 void __ibv_ack_cq_events(struct ibv_cq *cq, unsigned int nevents)
 {
+	struct IBV_ACK_CQ_EVENT_REQ req;
+	req.cq_handle = cq->handle;
+	req.nevents = nevents;
+
+	struct IBV_ACK_CQ_EVENT_RSP rsp;
+	int rsp_size;
+	request_router(IBV_ACK_CQ_EVENT, &req, &rsp, &rsp_size);
+
 	pthread_mutex_lock(&cq->mutex);
-	cq->comp_events_completed += nevents;
+	cq->comp_events_completed = rsp.comp_events_completed;
 	pthread_cond_signal(&cq->cond);
 	pthread_mutex_unlock(&cq->mutex);
 }
@@ -704,9 +763,13 @@ static inline int create_peer_from_gid(int family, void *raw_gid,
 	return 0;
 }
 
+/*
 #define NEIGH_GET_DEFAULT_TIMEOUT_MS 3000
 static struct ibv_ah *__ibv_create_ah_nl(struct ibv_pd *pd, struct ibv_ah_attr *attr)
 {
+	printf("### ib_create_ah_nl ###\n");
+	fflush(stdout);
+
 	struct ibv_ah *ah = NULL;
 #ifndef NRESOLVE_NEIGH
 	int err;
@@ -785,7 +848,7 @@ static struct ibv_ah *__ibv_create_ah_nl(struct ibv_pd *pd, struct ibv_ah_attr *
 	}
 
 
-	/* blocking call */
+	// blocking call 
 	if (process_get_neigh(&neigh_handler)) {
 		fprintf(stderr, PFX "Neigh resolution process failed\n");
 		goto free_resources;
@@ -797,7 +860,7 @@ static struct ibv_ah *__ibv_create_ah_nl(struct ibv_pd *pd, struct ibv_ah_attr *
 		neigh_set_vlan_id(&neigh_handler, attr_ex.vid);
 		attr_ex.comp_mask |= IBV_EXP_AH_ATTR_VID;
 	}
-	/* We are using only ethernet here */
+	// We are using only ethernet here
 	attr_ex.ll_address.len = neigh_get_ll(&neigh_handler, ethernet_ll,
 					      sizeof(ethernet_ll));
 
@@ -816,10 +879,19 @@ free_resources:
 #endif
 	return ah;
 }
+*/
 
 struct ibv_ah *__ibv_create_ah(struct ibv_pd *pd, struct ibv_ah_attr *attr)
 {
-	struct ibv_exp_port_attr port_attr;
+	struct ibv_ah *ah = malloc(sizeof(struct ibv_ah));
+	if (!ah)
+		return NULL;
+	memset(ah, 0, sizeof(struct ibv_ah));
+
+	ibv_cmd_create_ah(pd, ah, attr, NULL, 0);
+	return ah;
+
+	/*struct ibv_exp_port_attr port_attr;
 	struct ibv_exp_ah_attr attr_ex = {};
 	struct ibv_ah *ah;
 	int err;
@@ -858,7 +930,7 @@ struct ibv_ah *__ibv_create_ah(struct ibv_pd *pd, struct ibv_ah_attr *attr)
 		ah->context = pd->context;
 		ah->pd      = pd;
 	}
-	return ah;
+	return ah;*/
 }
 default_symver(__ibv_create_ah, ibv_create_ah);
 
@@ -1519,3 +1591,15 @@ int ibv_unreg_xrc_rcv_qp(struct ibv_xrc_domain *xrc_domain,
 
 }
 
+struct ibv_mr *__ibv_reg_mr_ff(struct ibv_pd *pd, void **addr, size_t length, int access, char* shm_name)
+{
+	struct ibv_mr *mr = (struct ibv_mr *) malloc(sizeof(struct ibv_mr));
+
+	if (ibv_cmd_reg_mr_ff(pd, addr, length, access, shm_name, mr) == 0)
+	{
+		return mr;
+	}
+
+	return NULL;
+}
+default_symver(__ibv_reg_mr_ff, ibv_reg_mr_ff);

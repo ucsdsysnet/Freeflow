@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2007 Cisco, Inc.  All rights reserved.
+ * Copyright (c) Microsoft Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -66,68 +67,7 @@ int mlx4_post_srq_recv(struct ibv_srq *ibsrq,
 		       struct ibv_recv_wr *wr,
 		       struct ibv_recv_wr **bad_wr)
 {
-	struct mlx4_srq *srq;
-	struct mlx4_wqe_srq_next_seg *next;
-	struct mlx4_wqe_data_seg *scat;
-	int err = 0;
-	int nreq;
-	int i;
-
-	if (ibsrq->handle == LEGACY_XRC_SRQ_HANDLE)
-		ibsrq = (struct ibv_srq *)(((struct ibv_srq_legacy *) ibsrq)->ibv_srq);
-
-	srq = to_msrq(ibsrq);
-	mlx4_spin_lock(&srq->lock);
-	for (nreq = 0; wr; ++nreq, wr = wr->next) {
-		if (wr->num_sge > srq->max_gs) {
-			errno = EINVAL;
-			err = errno;
-			*bad_wr = wr;
-			break;
-		}
-
-		if (srq->head == srq->tail) {
-			/* SRQ is full*/
-			errno = ENOMEM;
-			err = errno;
-			*bad_wr = wr;
-			break;
-		}
-
-		srq->wrid[srq->head] = wr->wr_id;
-
-		next      = get_wqe(srq, srq->head);
-		srq->head = ntohs(next->next_wqe_index);
-		scat      = (struct mlx4_wqe_data_seg *) (next + 1);
-
-		for (i = 0; i < wr->num_sge; ++i) {
-			scat[i].byte_count = htonl(wr->sg_list[i].length);
-			scat[i].lkey       = htonl(wr->sg_list[i].lkey);
-			scat[i].addr       = htonll(wr->sg_list[i].addr);
-		}
-
-		if (i < srq->max_gs) {
-			scat[i].byte_count = 0;
-			scat[i].lkey       = htonl(MLX4_INVALID_LKEY);
-			scat[i].addr       = 0;
-		}
-	}
-
-	if (nreq) {
-		srq->counter += nreq;
-
-		/*
-		 * Make sure that descriptors are written before
-		 * we write doorbell record.
-		 */
-		wmb();
-
-		*srq->db = htonl(srq->counter);
-	}
-
-	mlx4_spin_unlock(&srq->lock);
-
-	return err;
+	return ibv_cmd_post_srq_recv(ibsrq, wr, bad_wr);
 }
 
 int mlx4_alloc_srq_buf(struct ibv_pd *pd, struct ibv_srq_attr *attr,

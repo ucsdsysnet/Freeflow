@@ -66,7 +66,7 @@ void rdma_destroy_srq(struct rdma_cm_id *id);
  */
 static inline struct ibv_mr *
 rdma_reg_msgs(struct rdma_cm_id *id, void *addr, size_t length)
-{
+{	
 	return ibv_reg_mr(id->pd, addr, length, IBV_ACCESS_LOCAL_WRITE);
 }
 
@@ -80,8 +80,40 @@ rdma_reg_read(struct rdma_cm_id *id, void *addr, size_t length)
 static inline struct ibv_mr *
 rdma_reg_write(struct rdma_cm_id *id, void *addr, size_t length)
 {
+
 	return ibv_reg_mr(id->pd, addr, length, IBV_ACCESS_LOCAL_WRITE |
 						IBV_ACCESS_REMOTE_WRITE);
+}
+
+static inline struct ibv_mr *
+rdma_reg_msgs_ff(struct rdma_cm_id *id, void **addr, size_t length)
+{	
+	char shm_name[100];
+	sprintf(shm_name, "reg_msgs_%d", (uintptr_t)addr);
+
+	return ibv_reg_mr_ff(id->pd, addr, length, IBV_ACCESS_LOCAL_WRITE, shm_name);
+}
+
+static inline struct ibv_mr *
+rdma_reg_read_ff(struct rdma_cm_id *id, void **addr, size_t length)
+{
+	char shm_name[100];
+	sprintf(shm_name, "reg_read_%d", (uintptr_t)addr);
+
+	return ibv_reg_mr_ff(id->pd, addr, length, IBV_ACCESS_LOCAL_WRITE |
+						IBV_ACCESS_REMOTE_READ, shm_name);
+}
+
+static inline struct ibv_mr *
+rdma_reg_write_ff(struct rdma_cm_id *id, void **addr, size_t length)
+{
+
+	char shm_name[100];
+	sprintf(shm_name, "reg_write_%d", (uintptr_t)addr);
+
+	return ibv_reg_mr_ff(id->pd, addr, length, IBV_ACCESS_LOCAL_WRITE |
+						IBV_ACCESS_REMOTE_WRITE, shm_name);
+
 }
 
 static inline int

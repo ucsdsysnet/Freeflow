@@ -2,6 +2,7 @@
  * Copyright (c) 2005 Topspin Communications.  All rights reserved.
  * Copyright (c) 2005 PathScale, Inc.  All rights reserved.
  * Copyright (c) 2006 Cisco Systems, Inc.  All rights reserved.
+ * Copyright (c) Microsoft Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -43,7 +44,25 @@
 #include <alloca.h>
 #include <string.h>
 
+#include <sys/shm.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <errno.h>
+#include <semaphore.h>
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <semaphore.h>
+#include <time.h>
+#include <sys/time.h>
+#include <unistd.h>
+
 #include "ibverbs.h"
+#include "infiniband/arch.h"
+#include "infiniband/freeflow.h"
 
 enum ibv_cmd_type {
 	IBV_CMD_BASIC,
@@ -54,18 +73,18 @@ int ibv_cmd_get_context(struct ibv_context *context, struct ibv_get_context *cmd
 			size_t cmd_size, struct ibv_get_context_resp *resp,
 			size_t resp_size)
 {
-	if (abi_ver <= 2)
-		return ENOSYS;
+	if (PRINT_LOG)
+	{
+		printf("#### ibv_cmd_get_context ####\n");
+		fflush(stdout);
+	}
 
-	IBV_INIT_CMD_RESP(cmd, cmd_size, GET_CONTEXT, resp, resp_size);
-
-	if (write(context->cmd_fd, cmd, cmd_size) != cmd_size)
-		return errno;
-
-	VALGRIND_MAKE_MEM_DEFINED(resp, resp_size);
-
-	context->async_fd         = resp->async_fd;
-	context->num_comp_vectors = resp->num_comp_vectors;
+	struct IBV_GET_CONTEXT_RSP rsp;
+	int rsp_size;
+	request_router(IBV_GET_CONTEXT, NULL, &rsp, &rsp_size);
+	
+	context->async_fd = rsp.async_fd;
+	context->num_comp_vectors = rsp.num_comp_vectors;
 
 	return 0;
 }
@@ -121,16 +140,23 @@ int ibv_cmd_query_device(struct ibv_context *context,
 			 uint64_t *raw_fw_ver,
 			 struct ibv_query_device *cmd, size_t cmd_size)
 {
-	struct ibv_query_device_resp resp;
+	if (PRINT_LOG)
+	{
+		printf("#### ibv_cmd_query_device ####\n");
+		fflush(stdout);
+	}
 
-	IBV_INIT_CMD_RESP(cmd, cmd_size, QUERY_DEVICE, &resp, sizeof resp);
+	struct IBV_QUERY_DEV_RSP rsp;
+	int rsp_size;
+	request_router(IBV_QUERY_DEV, NULL, &rsp, &rsp_size);
+	memcpy(device_attr, &rsp.dev_attr, sizeof(struct ibv_device_attr));
+	
+	if (PRINT_LOG)
+	{
+		printf("vendor id=%d, vendor_part id=%d\n", device_attr->vendor_id, device_attr->vendor_part_id);
+		fflush(stdout);
+	}
 
-	if (write(context->cmd_fd, cmd, cmd_size) != cmd_size)
-		return errno;
-
-	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);
-	memset(device_attr->fw_ver, 0, sizeof(device_attr->fw_ver));
-	copy_query_dev_fields(device_attr, &resp, raw_fw_ver);
 	return 0;
 }
 
@@ -138,38 +164,27 @@ int ibv_cmd_query_port(struct ibv_context *context, uint8_t port_num,
 		       struct ibv_port_attr *port_attr,
 		       struct ibv_query_port *cmd, size_t cmd_size)
 {
-	struct ibv_query_port_resp resp;
+	if (PRINT_LOG)
+	{
+		printf("#### ibv_cmd_query_port ####\n");
+		fflush(stdout);
+	}
 
-	IBV_INIT_CMD_RESP(cmd, cmd_size, QUERY_PORT, &resp, sizeof resp);
-	cmd->port_num = port_num;
-	memset(cmd->reserved, 0, sizeof cmd->reserved);
+	struct IBV_QUERY_PORT_REQ req;
+	req.port_num = port_num;
 
-	if (write(context->cmd_fd, cmd, cmd_size) != cmd_size)
-		return errno;
+	struct IBV_QUERY_PORT_RSP rsp;
+	int rsp_size;
+	request_router(IBV_QUERY_PORT, &req, &rsp, &rsp_size);
+	
+	memcpy(port_attr, &rsp.port_attr, sizeof(struct ibv_port_attr));	
 
-	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);
-
-	port_attr->state      	   = resp.state;
-	port_attr->max_mtu         = resp.max_mtu;
-	port_attr->active_mtu      = resp.active_mtu;
-	port_attr->gid_tbl_len     = resp.gid_tbl_len;
-	port_attr->port_cap_flags  = resp.port_cap_flags;
-	port_attr->max_msg_sz      = resp.max_msg_sz;
-	port_attr->bad_pkey_cntr   = resp.bad_pkey_cntr;
-	port_attr->qkey_viol_cntr  = resp.qkey_viol_cntr;
-	port_attr->pkey_tbl_len    = resp.pkey_tbl_len;
-	port_attr->lid 	      	   = resp.lid;
-	port_attr->sm_lid 	   = resp.sm_lid;
-	port_attr->lmc 	      	   = resp.lmc;
-	port_attr->max_vl_num      = resp.max_vl_num;
-	port_attr->sm_sl      	   = resp.sm_sl;
-	port_attr->subnet_timeout  = resp.subnet_timeout;
-	port_attr->init_type_reply = resp.init_type_reply;
-	port_attr->active_width    = resp.active_width;
-	port_attr->active_speed    = resp.active_speed;
-	port_attr->phys_state      = resp.phys_state;
-	port_attr->link_layer      = resp.link_layer;
-
+	if (PRINT_LOG)
+	{
+		printf("state=%d, max_mtu=%d, active_mtu=%d\n", port_attr->state, port_attr->max_mtu, port_attr->active_mtu);
+		fflush(stdout);
+	}
+	
 	return 0;
 }
 
@@ -177,30 +192,44 @@ int ibv_cmd_alloc_pd(struct ibv_context *context, struct ibv_pd *pd,
 		     struct ibv_alloc_pd *cmd, size_t cmd_size,
 		     struct ibv_alloc_pd_resp *resp, size_t resp_size)
 {
-	IBV_INIT_CMD_RESP(cmd, cmd_size, ALLOC_PD, resp, resp_size);
+	if (PRINT_LOG)
+	{
+		printf("#### ibv_cmd_alloc_pd ####\n");
+		fflush(stdout);	
+	}
+	
+	struct IBV_ALLOC_PD_RSP rsp;
+	int rsp_size;
+	request_router(IBV_ALLOC_PD, NULL, &rsp, &rsp_size);
 
-	if (write(context->cmd_fd, cmd, cmd_size) != cmd_size)
-		return errno;
-
-	VALGRIND_MAKE_MEM_DEFINED(resp, resp_size);
-
-	pd->handle  = resp->pd_handle;
+	pd->handle = rsp.pd_handle;
 	pd->context = context;
 
+	if (PRINT_LOG)
+	{
+		printf("PD handle = %d\n", pd->handle);
+		fflush(stdout);
+	}
+	
 	return 0;
 }
 
 int ibv_cmd_dealloc_pd(struct ibv_pd *pd)
 {
-	struct ibv_dealloc_pd cmd;
+	if (PRINT_LOG)
+	{
+		printf("#### ibv_cmd_dealloc_pd ####\n");
+		fflush(stdout);
+	}
 
-	IBV_INIT_CMD(&cmd, sizeof cmd, DEALLOC_PD);
-	cmd.pd_handle = pd->handle;
+	struct IBV_DEALLOC_PD_REQ req;
+	req.pd_handle = pd->handle;
 
-	if (write(pd->context->cmd_fd, &cmd, sizeof cmd) != sizeof cmd)
-		return errno;
+	struct IBV_DEALLOC_PD_RSP rsp;
+	int rsp_size;
+	request_router(IBV_DEALLOC_PD, &req, &rsp, &rsp_size);
 
-	return 0;
+	return rsp.ret;
 }
 
 int ibv_cmd_open_xrcd(struct ibv_context *context, struct verbs_xrcd *xrcd,
@@ -210,6 +239,9 @@ int ibv_cmd_open_xrcd(struct ibv_context *context, struct verbs_xrcd *xrcd,
 				struct ibv_open_xrcd_resp *resp,
 				size_t resp_size)
 {
+	printf("#### ibv_cmd_open_xrcd ####\n");
+	fflush(stdout);
+
 	IBV_INIT_CMD_RESP(cmd, cmd_size, OPEN_XRCD, resp, resp_size);
 
 	if (attr->comp_mask >= IBV_XRCD_INIT_ATTR_RESERVED)
@@ -221,8 +253,8 @@ int ibv_cmd_open_xrcd(struct ibv_context *context, struct verbs_xrcd *xrcd,
 
 	cmd->fd = attr->fd;
 	cmd->oflags = attr->oflags;
-	if (write(context->cmd_fd, cmd, cmd_size) != cmd_size)
-		return errno;
+	/*if (write(context->cmd_fd, cmd, cmd_size) != cmd_size)
+		return errno;*/
 
 	VALGRIND_MAKE_MEM_DEFINED(resp, resp_size);
 
@@ -238,13 +270,16 @@ int ibv_cmd_open_xrcd(struct ibv_context *context, struct verbs_xrcd *xrcd,
 
 int ibv_cmd_close_xrcd(struct verbs_xrcd *xrcd)
 {
+	printf("#### ibv_cmd_close_xrcd ####\n");
+	fflush(stdout);
+
 	struct ibv_close_xrcd cmd;
 
 	IBV_INIT_CMD(&cmd, sizeof cmd, CLOSE_XRCD);
 	cmd.xrcd_handle = xrcd->handle;
 
-	if (write(xrcd->xrcd.context->cmd_fd, &cmd, sizeof cmd) != sizeof cmd)
-		return errno;
+	/*if (write(xrcd->xrcd.context->cmd_fd, &cmd, sizeof cmd) != sizeof cmd)
+		return errno;*/
 
 	return 0;
 }
@@ -255,25 +290,180 @@ int ibv_cmd_reg_mr(struct ibv_pd *pd, void *addr, size_t length,
 		   size_t cmd_size,
 		   struct ibv_reg_mr_resp *resp, size_t resp_size)
 {
+	int ret;
+	/* char key[64]; */
+	struct mr_shm* p;
+	
+	if (PRINT_LOG)
+	{
+		printf("#### ibv_cmd_reg_mr ####\n");
+		fflush(stdout);
+	}
 
-	IBV_INIT_CMD_RESP(cmd, cmd_size, REG_MR, resp, resp_size);
+	struct IBV_REG_MR_REQ req_body;
+	req_body.pd_handle = pd->handle;
+	req_body.mem_size = length;
+	req_body.access_flags = access;
+	req_body.shm_name[0] = '\0';
+	
+	struct IBV_REG_MR_RSP rsp;
+	int rsp_size;
+	request_router(IBV_REG_MR, &req_body, &rsp, &rsp_size);
 
-	cmd->start 	  = (uintptr_t) addr;
-	cmd->length 	  = length;
-	cmd->hca_va 	  = hca_va;
-	cmd->pd_handle 	  = pd->handle;
-	cmd->access_flags = access;
+	mr->handle  = rsp.handle;
+	mr->lkey    = rsp.lkey;
+	mr->rkey    = rsp.rkey;
+	strcpy(mr->shm_name, rsp.shm_name);
 
-	if (write(pd->context->cmd_fd, cmd, cmd_size) != cmd_size)
-		return errno;
+	// FreeFlow: mounting shared memory from router.
+	mr->shm_fd = shm_open(mr->shm_name, O_CREAT | O_RDWR, 0666);
+	ret = ftruncate(mr->shm_fd, length);
 
-	VALGRIND_MAKE_MEM_DEFINED(resp, resp_size);
+	char *membuff = (char *)malloc(length);
+	memcpy(membuff, addr, length);
 
-	mr->handle  = resp->mr_handle;
-	mr->lkey    = resp->lkey;
-	mr->rkey    = resp->rkey;
+        int is_align = (long)addr % (4 * 1024) == 0 ? 1 : 0;
+        if (is_align)
+		mr->shm_ptr = mmap(addr, length, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED | MAP_LOCKED, mr->shm_fd, 0); 
+	else
+		mr->shm_ptr = mmap(0, length, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_LOCKED, mr->shm_fd, 0); 
+
+
+	if (mr->shm_ptr == MAP_FAILED || ret > 0){
+		printf("mmap failed in reg mr.\n");
+		fflush(stdout);
+	}
+	else
+	{
+		memcpy(mr->shm_ptr, membuff, length);
+		if (PRINT_LOG)
+		{
+			printf("mmap succeed in reg mr.\n");
+		}
+
+		struct IBV_REG_MR_MAPPING_REQ new_req_body;
+		new_req_body.key = mr->lkey;
+		new_req_body.mr_ptr = addr;
+		new_req_body.shm_ptr = mr->shm_ptr;
+
+
+		struct IBV_REG_MR_MAPPING_RSP new_rsp;
+		request_router(IBV_REG_MR_MAPPING, &new_req_body, &new_rsp, &rsp_size);
+
+		p = (struct mr_shm*)mempool_insert(map_lkey_to_mrshm, mr->lkey);
+		p->mr = addr;
+		p->shm_ptr = mr->shm_ptr;
+
+		if (PRINT_LOG)
+		{
+			printf("@@@@@@@@ lkey=%u, addr=%lu, shm_prt=%lu\n", mr->lkey, (uint64_t)addr, (uint64_t)(mr->shm_ptr));
+			fflush(stdout);
+		}
+
+		/*
+		hashmap_put(map_lkey_to_shm_ptr, key, (void*)(mr->shm_ptr));
+		fflush(stdout);
+		*/	
+	}
+
+	mr->addr = addr;
+	mr->length = length;
 	mr->context = pd->context;
+	free(membuff);	
+	return 0;
+}
 
+int ibv_cmd_reg_mr_ff(struct ibv_pd *pd, void **addr, size_t length, int access, char *shm_name, struct ibv_mr *mr)
+{
+	int ret;
+	/* char key[64]; */
+	struct mr_shm* p;
+	
+	if (PRINT_LOG)
+	{
+		printf("#### ibv_cmd_reg_mr_ff ####\n");
+		fflush(stdout);
+	}
+
+	struct IBV_REG_MR_REQ req_body;
+	req_body.pd_handle = pd->handle;
+	req_body.mem_size = length;
+	req_body.access_flags = access;
+	if (shm_name == NULL)
+	{
+		req_body.shm_name[0] = '\0';
+	}
+	else
+	{
+		strcpy(req_body.shm_name, shm_name);
+	}
+	
+	struct IBV_REG_MR_RSP rsp;
+	int rsp_size;
+	request_router(IBV_REG_MR, &req_body, &rsp, &rsp_size);
+
+	mr->handle  = rsp.handle;
+	mr->lkey    = rsp.lkey;
+	mr->rkey    = rsp.rkey;
+	strcpy(mr->shm_name, rsp.shm_name);
+
+	// FreeFlow: mounting shared memory from router.
+	mr->shm_fd = shm_open(mr->shm_name, O_CREAT | O_RDWR, 0666);
+	ret = ftruncate(mr->shm_fd, length);
+	mr->shm_ptr = mmap(0, length, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_LOCKED, mr->shm_fd, 0);
+	
+	if (mr->shm_ptr == MAP_FAILED || ret > 0){
+		printf("mmap failed in reg mr.\n");
+		fflush(stdout);
+	}
+	else
+	{
+		if (PRINT_LOG)
+		{
+			printf("mmap succeed in reg mr.\n");
+		}
+
+		struct IBV_REG_MR_MAPPING_REQ new_req_body;
+		new_req_body.key = mr->lkey;
+		new_req_body.mr_ptr = mr->shm_ptr;
+		new_req_body.shm_ptr = mr->shm_ptr;
+		struct IBV_REG_MR_MAPPING_RSP new_rsp;
+		request_router(IBV_REG_MR_MAPPING, &new_req_body, &new_rsp, &rsp_size);
+
+		// Change the pointer.
+		char *membuff = (char *)malloc(length);
+		if (*addr != NULL)
+		{
+			memcpy(membuff, *addr, length);
+			*addr = mr->shm_ptr;
+			memcpy(*addr, membuff, length);
+		}
+		else
+		{
+			*addr = mr->shm_ptr;
+		}
+
+		free(membuff);	
+
+		p = (struct mr_shm*)mempool_insert(map_lkey_to_mrshm, mr->lkey);
+		p->mr = *addr;
+		p->shm_ptr = mr->shm_ptr;
+
+		if (PRINT_LOG)
+		{
+			printf("@@@@@@@@ lkey=%u, *addr=%lu, shm_prt=%lu\n", mr->lkey, (uint64_t)(*addr), (uint64_t)(mr->shm_ptr));
+			fflush(stdout);
+		}
+
+		/*
+		hashmap_put(map_lkey_to_shm_ptr, key, (void*)(mr->shm_ptr));
+		fflush(stdout);
+		*/	
+	}
+
+	mr->addr = *addr;
+	mr->length = length;
+	mr->context = pd->context;
 	return 0;
 }
 
@@ -283,6 +473,9 @@ int ibv_cmd_rereg_mr(struct ibv_mr *mr, uint32_t flags, void *addr,
 		     size_t cmd_sz, struct ibv_rereg_mr_resp *resp,
 		     size_t resp_sz)
 {
+	printf("#### ibv_cmd_rereg_mr ####\n");
+	fflush(stdout);
+
 	IBV_INIT_CMD_RESP(cmd, cmd_sz, REREG_MR, resp, resp_sz);
 
 	cmd->mr_handle	  = mr->handle;
@@ -293,8 +486,8 @@ int ibv_cmd_rereg_mr(struct ibv_mr *mr, uint32_t flags, void *addr,
 	cmd->pd_handle	  = (flags & IBV_REREG_MR_CHANGE_PD) ? pd->handle : 0;
 	cmd->access_flags = access;
 
-	if (write(mr->context->cmd_fd, cmd, cmd_sz) != cmd_sz)
-		return errno;
+	/*if (write(mr->context->cmd_fd, cmd, cmd_sz) != cmd_sz)
+		return errno;*/
 
 	VALGRIND_MAKE_MEM_DEFINED(resp, resp_sz);
 
@@ -308,15 +501,20 @@ int ibv_cmd_rereg_mr(struct ibv_mr *mr, uint32_t flags, void *addr,
 
 int ibv_cmd_dereg_mr(struct ibv_mr *mr)
 {
-	struct ibv_dereg_mr cmd;
+	// struct lkey_mr_shm* p;
 
-	IBV_INIT_CMD(&cmd, sizeof cmd, DEREG_MR);
-	cmd.mr_handle = mr->handle;
+	struct IBV_DEREG_MR_REQ req_body;
+	req_body.handle = mr->handle;
+	
+	struct IBV_DEREG_MR_RSP rsp;
+	int rsp_size;
+	request_router(IBV_DEREG_MR, &req_body, &rsp, &rsp_size);	
 
-	if (write(mr->context->cmd_fd, &cmd, sizeof cmd) != sizeof cmd)
-		return errno;
+	shm_unlink(mr->shm_name);
 
-	return 0;
+	mempool_del(map_lkey_to_mrshm, mr->lkey);
+
+	return rsp.ret;
 }
 
 int ibv_cmd_alloc_mw(struct ibv_pd *pd, enum ibv_mw_type type,
@@ -324,13 +522,16 @@ int ibv_cmd_alloc_mw(struct ibv_pd *pd, enum ibv_mw_type type,
 		     size_t cmd_size,
 		     struct ibv_alloc_mw_resp *resp, size_t resp_size)
 {
+	printf("#### ibv_cmd_alloc_mw ####\n");
+	fflush(stdout);
+
 	IBV_INIT_CMD_RESP(cmd, cmd_size, ALLOC_MW, resp, resp_size);
 	cmd->pd_handle	= pd->handle;
 	cmd->mw_type	= type;
 	memset(cmd->reserved, 0, sizeof(cmd->reserved));
 
-	if (write(pd->context->cmd_fd, cmd, cmd_size) != cmd_size)
-		return errno;
+	/*if (write(pd->context->cmd_fd, cmd, cmd_size) != cmd_size)
+		return errno;*/
 
 	VALGRIND_MAKE_MEM_DEFINED(resp, resp_size);
 
@@ -346,12 +547,15 @@ int ibv_cmd_alloc_mw(struct ibv_pd *pd, enum ibv_mw_type type,
 int ibv_cmd_dealloc_mw(struct ibv_mw *mw,
 		       struct ibv_dealloc_mw *cmd, size_t cmd_size)
 {
+	printf("#### ibv_cmd_dealloc_mw ####\n");
+	fflush(stdout);
+
 	IBV_INIT_CMD(cmd, cmd_size, DEALLOC_MW);
 	cmd->mw_handle = mw->handle;
 	cmd->reserved = 0;
 
-	if (write(mw->context->cmd_fd, cmd, cmd_size) != cmd_size)
-		return errno;
+	/*if (write(mw->context->cmd_fd, cmd, cmd_size) != cmd_size)
+		return errno;*/
 
 	return 0;
 }
@@ -362,96 +566,270 @@ int ibv_cmd_create_cq(struct ibv_context *context, int cqe,
 		      struct ibv_create_cq *cmd, size_t cmd_size,
 		      struct ibv_create_cq_resp *resp, size_t resp_size)
 {
-	IBV_INIT_CMD_RESP(cmd, cmd_size, CREATE_CQ, resp, resp_size);
-	cmd->user_handle   = (uintptr_t) cq;
-	cmd->cqe           = cqe;
-	cmd->comp_vector   = comp_vector;
-	cmd->comp_channel  = channel ? channel->fd : -1;
-	cmd->reserved      = 0;
+	
+	if (PRINT_LOG)
+	{
+		printf("#### ibv_cmd_create_cq ####\n");
+		fflush(stdout);
+	}
 
-	if (write(context->cmd_fd, cmd, cmd_size) != cmd_size)
-		return errno;
+	struct IBV_CREATE_CQ_REQ req_body;
+	req_body.channel_fd =channel ? comp_channel_map[channel->fd] : -1;
+	req_body.comp_vector = comp_vector;
+	req_body.cqe = cqe;
+	
+	struct IBV_CREATE_CQ_RSP rsp;
+	int rsp_size;
+	request_router(IBV_CREATE_CQ, &req_body, &rsp, &rsp_size);
 
-	VALGRIND_MAKE_MEM_DEFINED(resp, resp_size);
-
-	cq->handle  = resp->cq_handle;
-	cq->cqe     = resp->cqe;
+	if (PRINT_LOG)
+	{
+		printf("CQ return from router: cqe=%d\n", rsp.cqe);
+	}
+	
+	cq->handle  = rsp.handle;
+	cq->cqe     = rsp.cqe;
 	cq->context = context;
+
+	int fd = shm_open(rsp.shm_name, O_CREAT | O_RDWR, 0666);
+	if (ftruncate(fd, sizeof(struct CtrlShmPiece))) {
+		printf("[Error] Fail to mount shm %s\n", rsp.shm_name);
+		fflush(stdout);
+	}
+	void* shm_p = mmap(0, sizeof(struct CtrlShmPiece), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_LOCKED, fd, 0);
+	cq_shm_map[cq->handle] = (struct CtrlShmPiece *)shm_p;
+	pthread_mutex_init(&(cq_shm_mtx_map[cq->handle]), NULL); 
+
+	if (cqe > WR_QUEUE_SIZE) {
+		printf("Freeflow WARNING: attempt to create a very large CQ. This may cause problems.\n");
+	}
+	map_cq_to_wr_queue[cq->handle] = (struct wr_queue*)malloc(sizeof(struct wr_queue));
+	map_cq_to_wr_queue[cq->handle]->queue = (struct wr*)malloc(sizeof(struct wr) * WR_QUEUE_SIZE);
+	map_cq_to_wr_queue[cq->handle]->head = 0;
+	map_cq_to_wr_queue[cq->handle]->tail = 0;
+	pthread_spin_init(&(map_cq_to_wr_queue[cq->handle]->head_lock), PTHREAD_PROCESS_PRIVATE);
+	pthread_spin_init(&(map_cq_to_wr_queue[cq->handle]->tail_lock), PTHREAD_PROCESS_PRIVATE);
 
 	return 0;
 }
 
 int ibv_cmd_poll_cq(struct ibv_cq *ibcq, int ne, struct ibv_wc *wc)
 {
-	struct ibv_poll_cq       cmd;
-	struct ibv_poll_cq_resp *resp;
-	int                      i;
-	int                      rsize;
-	int                      ret;
+	//struct timespec st, et, stt, ett;
+	//int time_us;
+	//clock_gettime(CLOCK_REALTIME, &st);
 
-	rsize = sizeof *resp + ne * sizeof(struct ibv_kern_wc);
-	resp  = malloc(rsize);
-	if (!resp)
+	int                      i, j, wr_index;
+	struct sge_record        *s;
+	struct wr_queue          *wr_queue;
+	struct wr                *wr_p;
+
+	struct CtrlShmPiece* csp = cq_shm_map[ibcq->handle];
+	pthread_mutex_t* csp_mtx = &(cq_shm_mtx_map[ibcq->handle]);
+	struct FfrRequestHeader   *req_header = (struct FfrRequestHeader*)(csp->req);
+	struct IBV_POLL_CQ_REQ    *req = (struct IBV_POLL_CQ_REQ*)(csp->req + sizeof(struct FfrRequestHeader));
+	struct FfrResponseHeader  *rsp_header = (struct FfrResponseHeader*)csp->rsp;
+	struct ibv_wc             *wc_list = (struct ibv_wc*)(csp->rsp + sizeof(struct FfrResponseHeader));
+
+
+	if (PRINT_LOG)
+	{
+		printf("#### ibv_cmd_poll_cq ####\n");
+		fflush(stdout);
+	}
+
+	pthread_mutex_lock(csp_mtx);
+
+	req_header->client_id = ffr_client_id;
+	req_header->func = IBV_POLL_CQ;
+	req_header->body_size = sizeof(struct IBV_POLL_CQ_REQ);
+
+	req->cq_handle = ibcq->handle;
+	req->ne = ne;
+
+
+	// patch SRQ
+	if (map_cq_to_srq[ibcq->handle] <= MAP_SIZE) {
+		pthread_spin_lock(&(map_srq_to_wr_queue[map_cq_to_srq[ibcq->handle]]->tail_lock));
+	}
+
+        uint8_t disable_fastpath = 0;
+	if (!getenv("DISABLE_FASTPATH")) 
+	{
+            disable_fastpath = 0;
+        }
+        else 
+	{
+            disable_fastpath = atoi(getenv("DISABLE_FASTPATH"));
+        }
+
+        if (disable_fastpath)
+	{
+		request_router(IBV_POLL_CQ, req, wc_list, &rsp_header->rsp_size);
+        }
+        else
+	{
+ 		request_router_shm(csp);
+	}
+
+	if (rsp_header->rsp_size % sizeof(struct ibv_wc) != 0)
+	{
+		printf("[Error] The rsp size is %d while the unit ibn_wc size is %d.", rsp_header->rsp_size, (int)sizeof(struct ibv_wc));
+		fflush(stdout);
+		pthread_mutex_unlock(csp_mtx);
 		return -1;
-
-	IBV_INIT_CMD_RESP(&cmd, sizeof cmd, POLL_CQ, resp, rsize);
-	cmd.cq_handle = ibcq->handle;
-	cmd.ne        = ne;
-
-	if (write(ibcq->context->cmd_fd, &cmd, sizeof cmd) != sizeof cmd) {
-		ret = -1;
-		goto out;
 	}
 
-	VALGRIND_MAKE_MEM_DEFINED(resp, rsize);
+	int count = rsp_header->rsp_size / sizeof(struct ibv_wc);
 
-	for (i = 0; i < resp->count; i++) {
-		wc[i].wr_id 	     = resp->wc[i].wr_id;
-		wc[i].status 	     = resp->wc[i].status;
-		wc[i].opcode 	     = resp->wc[i].opcode;
-		wc[i].vendor_err     = resp->wc[i].vendor_err;
-		wc[i].byte_len 	     = resp->wc[i].byte_len;
-		wc[i].imm_data 	     = resp->wc[i].imm_data;
-		wc[i].qp_num 	     = resp->wc[i].qp_num;
-		wc[i].src_qp 	     = resp->wc[i].src_qp;
-		wc[i].wc_flags 	     = resp->wc[i].wc_flags;
-		wc[i].pkey_index     = resp->wc[i].pkey_index;
-		wc[i].slid 	     = resp->wc[i].slid;
-		wc[i].sl 	     = resp->wc[i].sl;
-		wc[i].dlid_path_bits = resp->wc[i].dlid_path_bits;
+	if (PRINT_LOG)
+	{
+		printf("count = %d, rsp_size = %d, sizeof struct ibv_wc=%d\n", count, rsp_header->rsp_size, (int)sizeof(struct ibv_wc));
+		fflush(stdout);
 	}
 
-	ret = resp->count;
+	memcpy((char*)wc, (char const *)wc_list, rsp_header->rsp_size);
 
-out:
-	free(resp);
-	return ret;
+	/*
+	for (i = 0; i < count; i++) {
+		wc[i].wr_id = wc_list[i].wr_id;
+		wc[i].status = wc_list[i].status;
+		wc[i].opcode = wc_list[i].opcode;
+		wc[i].vendor_err = wc_list[i].vendor_err;
+		wc[i].byte_len = wc_list[i].byte_len;
+		wc[i].imm_data = wc_list[i].imm_data;
+		wc[i].qp_num = wc_list[i].qp_num;
+		wc[i].src_qp = wc_list[i].src_qp;
+		wc[i].wc_flags = wc_list[i].wc_flags;
+		wc[i].pkey_index = wc_list[i].pkey_index;
+		wc[i].slid = wc_list[i].slid;
+		wc[i].sl = wc_list[i].sl;
+		wc[i].dlid_path_bits = wc_list[i].dlid_path_bits;
+	}
+	*/
+
+	if (PRINT_LOG)
+	{
+		for (i = 0; i < count; i++) {
+			printf("=================================\n");
+			printf("wc_list[%d].wr_id=%lu\n", i, (unsigned long)wc_list[i].wr_id);
+			printf("wc_list[%d].status=%d\n", i, wc_list[i].status);
+			printf("wc_list[%d].opcode=%d\n", i, wc_list[i].opcode);
+			printf("wc_list[%d].vendor_err=%d\n", i, wc_list[i].vendor_err);
+			printf("wc_list[%d].byte_len=%d\n", i, wc_list[i].byte_len);
+			printf("wc_list[%d].imm_data=%u\n", i, wc_list[i].imm_data);
+			printf("wc_list[%d].qp_num=%d\n", i, wc_list[i].qp_num);
+			printf("wc_list[%d].src_qp=%d\n", i, wc_list[i].src_qp);
+			printf("wc_list[%d].wc_flags=%d\n", i, wc_list[i].wc_flags);
+			printf("wc_list[%d].pkey_index=%d\n", i, wc_list[i].pkey_index);
+			printf("wc_list[%d].slid=%d\n", i, wc_list[i].slid);
+			printf("wc_list[%d].sl=%d\n", i, wc_list[i].sl);
+			printf("wc_list[%d].ldid_path_bits=%d\n", i, wc_list[i].dlid_path_bits);
+			fflush(stdout);
+		}
+	}
+
+	/* Copying shared memory here if it is a receve queue. */
+	
+	//struct node *n_ptr = NULL;
+	for (i = 0; i < count; i++) {
+		if ((wc_list[i].opcode) & IBV_WC_RECV) {
+			//clock_gettime(CLOCK_REALTIME, &stt);
+			
+			if (map_cq_to_srq[ibcq->handle] > MAP_SIZE) {
+				wr_queue = map_cq_to_wr_queue[ibcq->handle];
+			}
+			else {
+				wr_queue = map_srq_to_wr_queue[map_cq_to_srq[ibcq->handle]];
+			}
+
+			// we are already in critical section
+			// pthread_spin_lock(&(wr_queue->tail_lock));
+			wr_index = wr_queue->tail;
+			wr_queue->tail++;
+			if (wr_queue->tail >= WR_QUEUE_SIZE) {
+				wr_queue->tail = 0;
+			}
+			// pthread_spin_unlock(&(wr_queue->tail_lock));
+
+			wr_p = wr_queue->queue + wr_index;
+
+	            //clock_gettime(CLOCK_REALTIME, &ett);
+                //   time_us = (ett.tv_sec - stt.tv_sec) * 1000000 +
+                //   (ett.tv_nsec - stt.tv_nsec) / 1000;
+                //if (time_us >= 5)
+				//printf("@@ mempool_get --> %d\n", time_us);
+				//fflush(stdout);
+
+			/* freeflow retrieve addresses */
+			if (wr_p->sge_num) {
+				s = (struct sge_record*)(wr_p->sge_queue);
+				for (j = 0; j < wr_p->sge_num; j++) {
+					if (s->mr_addr != s->shm_addr)
+					{
+						memcpy(s->mr_addr, s->shm_addr, s->length);	
+					}
+					s++;
+				}
+				free(wr_p->sge_queue);
+			}
+		}
+	}
+
+	wmb();
+	csp->state = IDLE;
+	// patch SRQ
+	if (map_cq_to_srq[ibcq->handle] <= MAP_SIZE) {
+		pthread_spin_unlock(&(map_srq_to_wr_queue[map_cq_to_srq[ibcq->handle]]->tail_lock));
+	}
+	pthread_mutex_unlock(csp_mtx);
+
+	//clock_gettime(CLOCK_REALTIME, &et);
+    //    time_us = (et.tv_sec - st.tv_sec) * 1000000 +
+    //                        (et.tv_nsec - st.tv_nsec) / 1000;
+
+	//if (count > 0 && PRINT_LOG)
+	//if (count > 0 && time_us >= 5)
+	//{
+	//	printf("##> poll_cq_delay = %d us, req size = %d Bytes\n", time_us, rsp_size);
+	//	fflush(stdout);
+	//}
+
+	return count;
 }
 
 int ibv_cmd_req_notify_cq(struct ibv_cq *ibcq, int solicited_only)
 {
-	struct ibv_req_notify_cq cmd;
+	if (PRINT_LOG)
+	{
+		printf("#### ibv_cmd_req_notify_cq ####\n");
+		fflush(stdout);
+	}
 
-	IBV_INIT_CMD(&cmd, sizeof cmd, REQ_NOTIFY_CQ);
-	cmd.cq_handle = ibcq->handle;
-	cmd.solicited = !!solicited_only;
+	struct IBV_REQ_NOTIFY_CQ_REQ req_body;
+	req_body.cq_handle = ibcq->handle;
+	req_body.solicited_only = solicited_only;
+	
+	struct IBV_REQ_NOTIFY_CQ_RSP rsp;
+	int rsp_size;
+	request_router(IBV_REQ_NOTIFY_CQ, &req_body, &rsp, &rsp_size);	
 
-	if (write(ibcq->context->cmd_fd, &cmd, sizeof cmd) != sizeof cmd)
-		return errno;
-
-	return 0;
+	return rsp.ret;
 }
 
 int ibv_cmd_resize_cq(struct ibv_cq *cq, int cqe,
 		      struct ibv_resize_cq *cmd, size_t cmd_size,
 		      struct ibv_resize_cq_resp *resp, size_t resp_size)
 {
+	printf("#### ibv_cmd_resize_cq ####\n");
+	fflush(stdout);
+
 	IBV_INIT_CMD_RESP(cmd, cmd_size, RESIZE_CQ, resp, resp_size);
 	cmd->cq_handle = cq->handle;
 	cmd->cqe       = cqe;
 
-	if (write(cq->context->cmd_fd, cmd, cmd_size) != cmd_size)
-		return errno;
+	/*if (write(cq->context->cmd_fd, cmd, cmd_size) != cmd_size)
+		return errno;*/
 
 	VALGRIND_MAKE_MEM_DEFINED(resp, resp_size);
 
@@ -462,25 +840,20 @@ int ibv_cmd_resize_cq(struct ibv_cq *cq, int cqe,
 
 int ibv_cmd_destroy_cq(struct ibv_cq *cq)
 {
-	struct ibv_destroy_cq      cmd;
-	struct ibv_destroy_cq_resp resp;
+	if (PRINT_LOG)
+	{
+		printf("#### ibv_cmd_destroy_cq ####\n");
+		fflush(stdout);
+	}
 
-	IBV_INIT_CMD_RESP(&cmd, sizeof cmd, DESTROY_CQ, &resp, sizeof resp);
-	cmd.cq_handle = cq->handle;
-	cmd.reserved  = 0;
+	struct IBV_DESTROY_CQ_REQ req_body;
+	req_body.cq_handle = cq->handle;
+	
+	struct IBV_DESTROY_CQ_RSP rsp;
+	int rsp_size;
+	request_router(IBV_DESTROY_CQ, &req_body, &rsp, &rsp_size);	
 
-	if (write(cq->context->cmd_fd, &cmd, sizeof cmd) != sizeof cmd)
-		return errno;
-
-	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);
-
-	pthread_mutex_lock(&cq->mutex);
-	while (cq->comp_events_completed  != resp.comp_events_reported ||
-	       cq->async_events_completed != resp.async_events_reported)
-		pthread_cond_wait(&cq->cond, &cq->mutex);
-	pthread_mutex_unlock(&cq->mutex);
-
-	return 0;
+	return rsp.ret;
 }
 
 int ibv_cmd_create_srq(struct ibv_pd *pd,
@@ -488,32 +861,41 @@ int ibv_cmd_create_srq(struct ibv_pd *pd,
 		       struct ibv_create_srq *cmd, size_t cmd_size,
 		       struct ibv_create_srq_resp *resp, size_t resp_size)
 {
-	IBV_INIT_CMD_RESP(cmd, cmd_size, CREATE_SRQ, resp, resp_size);
-	cmd->user_handle = (uintptr_t) srq;
-	cmd->pd_handle 	 = pd->handle;
-	cmd->max_wr      = attr->attr.max_wr;
-	cmd->max_sge     = attr->attr.max_sge;
-	cmd->srq_limit   = attr->attr.srq_limit;
+	if (PRINT_LOG)
+	{
+		printf("#### ibv_cmd_create_srq ####\n");
+		fflush(stdout);
+	}
 
-	if (write(pd->context->cmd_fd, cmd, cmd_size) != cmd_size)
-		return errno;
+	struct IBV_CREATE_SRQ_REQ req_body;
+	req_body.pd_handle = pd->handle;
+	memcpy(&(req_body.attr), attr, sizeof(struct ibv_srq_init_attr));
+	
+	struct IBV_CREATE_SRQ_RSP rsp;
+	int rsp_size;
+	request_router(IBV_CREATE_SRQ, &req_body, &rsp, &rsp_size);	
 
-	VALGRIND_MAKE_MEM_DEFINED(resp, resp_size);
-
-	srq->handle  = resp->srq_handle;
+	srq->handle = rsp.srq_handle;
 	srq->context = pd->context;
 
-	if (abi_ver > 5) {
-		attr->attr.max_wr = resp->max_wr;
-		attr->attr.max_sge = resp->max_sge;
-	} else {
-		struct ibv_create_srq_resp_v5 *resp_v5 =
-			(struct ibv_create_srq_resp_v5 *) resp;
-
-		memmove((void *) resp + sizeof *resp,
-			(void *) resp_v5 + sizeof *resp_v5,
-			resp_size - sizeof *resp);
+	if (attr->attr.max_wr > WR_QUEUE_SIZE) {
+		printf("Freeflow WARNING: attempt to create a very large SRQ. This may cause problems.\n");
 	}
+
+	int fd = shm_open(rsp.shm_name, O_CREAT | O_RDWR, 0666);
+	if (ftruncate(fd, sizeof(struct CtrlShmPiece))) {
+		printf("[Error] Fail to mount shm %s\n", rsp.shm_name);
+		fflush(stdout);
+	}
+	void* shm_p = mmap(0, sizeof(struct CtrlShmPiece), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_LOCKED, fd, 0);
+	srq_shm_map[srq->handle] = (struct CtrlShmPiece *)shm_p;
+
+	map_srq_to_wr_queue[srq->handle] = (struct wr_queue*)malloc(sizeof(struct wr_queue));
+	map_srq_to_wr_queue[srq->handle]->queue = (struct wr*)malloc(sizeof(struct wr) * WR_QUEUE_SIZE);
+	map_srq_to_wr_queue[srq->handle]->head = 0;
+	map_srq_to_wr_queue[srq->handle]->tail = 0;
+	pthread_spin_init(&(map_srq_to_wr_queue[srq->handle]->head_lock), PTHREAD_PROCESS_PRIVATE);
+	pthread_spin_init(&(map_srq_to_wr_queue[srq->handle]->tail_lock), PTHREAD_PROCESS_PRIVATE);
 
 	return 0;
 }
@@ -524,6 +906,9 @@ int ibv_cmd_create_srq_ex(struct ibv_context *context,
 			  struct ibv_create_xsrq *cmd, size_t cmd_size,
 			  struct ibv_create_srq_resp *resp, size_t resp_size)
 {
+	printf("#### ibv_cmd_create_srq_ex ####\n");
+	fflush(stdout);
+
 	struct verbs_xrcd *vxrcd = NULL;
 
 	IBV_INIT_CMD_RESP(cmd, cmd_size, CREATE_XSRQ, resp, resp_size);
@@ -551,8 +936,8 @@ int ibv_cmd_create_srq_ex(struct ibv_context *context,
 		cmd->cq_handle   = attr_ex->cq->handle;
 	}
 
-	if (write(context->cmd_fd, cmd, cmd_size) != cmd_size)
-		return errno;
+	/*if (write(context->cmd_fd, cmd, cmd_size) != cmd_size)
+		return errno;*/
 
 	VALGRIND_MAKE_MEM_DEFINED(resp, resp_size);
 
@@ -595,68 +980,42 @@ int ibv_cmd_create_srq_ex(struct ibv_context *context,
 	return 0;
 }
 
-
-static int ibv_cmd_modify_srq_v3(struct ibv_srq *srq,
-				 struct ibv_srq_attr *srq_attr,
-				 int srq_attr_mask,
-				 struct ibv_modify_srq *new_cmd,
-				 size_t new_cmd_size)
-{
-	struct ibv_modify_srq_v3 *cmd;
-	size_t cmd_size;
-
-	cmd_size = sizeof *cmd + new_cmd_size - sizeof *new_cmd;
-	cmd      = alloca(cmd_size);
-	memcpy(cmd->driver_data, new_cmd->driver_data, new_cmd_size - sizeof *new_cmd);
-
-	IBV_INIT_CMD(cmd, cmd_size, MODIFY_SRQ);
-
-	cmd->srq_handle	= srq->handle;
-	cmd->attr_mask	= srq_attr_mask;
-	cmd->max_wr	= srq_attr->max_wr;
-	cmd->srq_limit	= srq_attr->srq_limit;
-	cmd->max_sge	= 0;
-	cmd->reserved	= 0;
-
-	if (write(srq->context->cmd_fd, cmd, cmd_size) != cmd_size)
-		return errno;
-
-	return 0;
-}
-
 int ibv_cmd_modify_srq(struct ibv_srq *srq,
 		       struct ibv_srq_attr *srq_attr,
 		       int srq_attr_mask,
 		       struct ibv_modify_srq *cmd, size_t cmd_size)
 {
-	if (abi_ver == 3)
-		return ibv_cmd_modify_srq_v3(srq, srq_attr, srq_attr_mask,
-					     cmd, cmd_size);
+	//if (PRINT_LOG)
+	//{
+		printf("#### ibv_cmd_modify_srq ####\n");
+		fflush(stdout);
+	//}
 
-	IBV_INIT_CMD(cmd, cmd_size, MODIFY_SRQ);
-
-	cmd->srq_handle	= srq->handle;
-	cmd->attr_mask	= srq_attr_mask;
-	cmd->max_wr	= srq_attr->max_wr;
-	cmd->srq_limit	= srq_attr->srq_limit;
-
-	if (write(srq->context->cmd_fd, cmd, cmd_size) != cmd_size)
-		return errno;
-
-	return 0;
+	struct IBV_MODIFY_SRQ_REQ req_body;
+	req_body.srq_handle = srq->handle;
+	memcpy(&req_body.attr, srq_attr, sizeof(struct ibv_srq_attr));
+	req_body.srq_attr_mask = srq_attr_mask;
+	
+	struct IBV_MODIFY_SRQ_RSP rsp;
+	int rsp_size;
+	request_router(IBV_MODIFY_SRQ, &req_body, &rsp, &rsp_size);
+	return rsp.ret;
 }
 
 int ibv_cmd_query_srq(struct ibv_srq *srq, struct ibv_srq_attr *srq_attr,
 		      struct ibv_query_srq *cmd, size_t cmd_size)
 {
+	printf("#### ibv_cmd_query_srq ####\n");
+	fflush(stdout);
+
 	struct ibv_query_srq_resp resp;
 
 	IBV_INIT_CMD_RESP(cmd, cmd_size, QUERY_SRQ, &resp, sizeof resp);
 	cmd->srq_handle = srq->handle;
 	cmd->reserved   = 0;
 
-	if (write(srq->context->cmd_fd, cmd, cmd_size) != cmd_size)
-		return errno;
+	/*if (write(srq->context->cmd_fd, cmd, cmd_size) != cmd_size)
+		return errno;*/
 
 	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);
 
@@ -669,24 +1028,20 @@ int ibv_cmd_query_srq(struct ibv_srq *srq, struct ibv_srq_attr *srq_attr,
 
 int ibv_cmd_destroy_srq(struct ibv_srq *srq)
 {
-	struct ibv_destroy_srq      cmd;
-	struct ibv_destroy_srq_resp resp;
+	if (PRINT_LOG)
+	{
+		printf("#### ibv_cmd_destroy_srq ####\n");
+		fflush(stdout);
+	}
 
-	IBV_INIT_CMD_RESP(&cmd, sizeof cmd, DESTROY_SRQ, &resp, sizeof resp);
-	cmd.srq_handle = srq->handle;
-	cmd.reserved   = 0;
+	struct IBV_DESTROY_SRQ_REQ req_body;
+	req_body.srq_handle = srq->handle;
+	
+	struct IBV_DESTROY_SRQ_RSP rsp;
+	int rsp_size;
+	request_router(IBV_DESTROY_SRQ, &req_body, &rsp, &rsp_size);	
 
-	if (write(srq->context->cmd_fd, &cmd, sizeof cmd) != sizeof cmd)
-		return errno;
-
-	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);
-
-	pthread_mutex_lock(&srq->mutex);
-	while (srq->events_completed != resp.events_reported)
-		pthread_cond_wait(&srq->cond, &srq->mutex);
-	pthread_mutex_unlock(&srq->mutex);
-
-	return 0;
+	return rsp.ret;
 }
 
 int ibv_cmd_create_qp(struct ibv_pd *pd,
@@ -694,57 +1049,77 @@ int ibv_cmd_create_qp(struct ibv_pd *pd,
 		      struct ibv_create_qp *cmd, size_t cmd_size,
 		      struct ibv_create_qp_resp *resp, size_t resp_size)
 {
-	IBV_INIT_CMD_RESP(cmd, cmd_size, CREATE_QP, resp, resp_size);
+	if (PRINT_LOG)
+	{
+		printf("#### ibv_cmd_create_qp ####\n");
+		fflush(stdout);
+	}
 
-	cmd->user_handle     = (uintptr_t) qp;
-	cmd->pd_handle       = pd->handle;
-	cmd->send_cq_handle  = attr->send_cq->handle;
-	cmd->recv_cq_handle  = attr->recv_cq->handle;
-	cmd->srq_handle      = attr->srq ? attr->srq->handle : 0;
-	cmd->max_send_wr     = attr->cap.max_send_wr;
-	cmd->max_recv_wr     = attr->cap.max_recv_wr;
-	cmd->max_send_sge    = attr->cap.max_send_sge;
-	cmd->max_recv_sge    = attr->cap.max_recv_sge;
-	cmd->max_inline_data = attr->cap.max_inline_data;
-	cmd->sq_sig_all	     = attr->sq_sig_all;
-	cmd->qp_type 	     = attr->qp_type;
-	cmd->is_srq 	     = !!attr->srq;
-	cmd->reserved	     = 0;
+	struct IBV_CREATE_QP_REQ req_body;
+	// void* wr_queue, *p;
 
-	if (write(pd->context->cmd_fd, cmd, cmd_size) != cmd_size)
-		return errno;
+	req_body.pd_handle = pd->handle;
+	req_body.qp_type = attr->qp_type;
+	req_body.sq_sig_all = attr->sq_sig_all;
+	req_body.send_cq_handle = attr->send_cq->handle;
+	req_body.recv_cq_handle = attr->recv_cq->handle;
+	req_body.srq_handle = attr->srq ? attr->srq->handle : 0;
+	req_body.cap.max_recv_sge    = attr->cap.max_recv_sge;
+	req_body.cap.max_send_sge    = attr->cap.max_send_sge;
+	req_body.cap.max_recv_wr     = attr->cap.max_recv_wr;
+	req_body.cap.max_send_wr     = attr->cap.max_send_wr;
+	req_body.cap.max_inline_data = attr->cap.max_inline_data;
 
-	VALGRIND_MAKE_MEM_DEFINED(resp, resp_size);
+	struct IBV_CREATE_QP_RSP rsp;
+	int rsp_size;
+	request_router(IBV_CREATE_QP, &req_body, &rsp, &rsp_size);
 
-	qp->handle 		  = resp->qp_handle;
-	qp->qp_num 		  = resp->qpn;
+	qp->handle 		  = rsp.handle;
+	qp->qp_num 		  = rsp.qp_num;
 	qp->context		  = pd->context;
 
 	if (abi_ver > 3) {
-		attr->cap.max_recv_sge    = resp->max_recv_sge;
-		attr->cap.max_send_sge    = resp->max_send_sge;
-		attr->cap.max_recv_wr     = resp->max_recv_wr;
-		attr->cap.max_send_wr     = resp->max_send_wr;
-		attr->cap.max_inline_data = resp->max_inline_data;
+		attr->cap.max_recv_sge    = rsp.cap.max_recv_sge;
+		attr->cap.max_send_sge    = rsp.cap.max_send_sge;
+		attr->cap.max_recv_wr     = rsp.cap.max_recv_wr;
+		attr->cap.max_send_wr     = rsp.cap.max_send_wr;
+		attr->cap.max_inline_data = rsp.cap.max_inline_data;
+	}
+	
+	// Disable inline data
+	attr->cap.max_inline_data = 0;
+
+	// Patch SRQ
+	if (qp->srq) {
+		map_cq_to_srq[qp->recv_cq->handle] = qp->srq->handle;
+	}
+	else {
+		map_cq_to_srq[qp->recv_cq->handle] = MAP_SIZE + 1;
 	}
 
-	if (abi_ver == 4) {
-		struct ibv_create_qp_resp_v4 *resp_v4 =
-			(struct ibv_create_qp_resp_v4 *) resp;
-
-		memmove((void *) resp + sizeof *resp,
-			(void *) resp_v4 + sizeof *resp_v4,
-			resp_size - sizeof *resp);
-	} else if (abi_ver <= 3) {
-		struct ibv_create_qp_resp_v3 *resp_v3 =
-			(struct ibv_create_qp_resp_v3 *) resp;
-
-		memmove((void *) resp + sizeof *resp,
-			(void *) resp_v3 + sizeof *resp_v3,
-			resp_size - sizeof *resp);
+	int fd = shm_open(rsp.shm_name, O_CREAT | O_RDWR, 0666);
+	if (ftruncate(fd, sizeof(struct CtrlShmPiece))) {
+		printf("[Error] Fail to mount shm %s\n", rsp.shm_name);
+		fflush(stdout);
 	}
+	void* shm_p = mmap(0, sizeof(struct CtrlShmPiece), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_LOCKED, fd, 0);
+        
+    if (!shm_p)
+	{
+		printf("[Error] Fail to mount shm %s\n", rsp.shm_name);
+		fflush(stdout);
+	}
+        else
+	{
+		printf("[INFO] Succeed to mount shm %s\n", rsp.shm_name);
+		fflush(stdout);
+	}
+
+        qp_shm_map[qp->handle] = (struct CtrlShmPiece *)shm_p;
+        pthread_mutex_init(&(qp_shm_mtx_map[qp->handle]), NULL); 
 
 	return 0;
+
 }
 
 int ibv_cmd_open_qp(struct ibv_context *context, struct verbs_qp *qp,
@@ -753,6 +1128,9 @@ int ibv_cmd_open_qp(struct ibv_context *context, struct verbs_qp *qp,
 			struct ibv_open_qp *cmd, size_t cmd_size,
 			struct ibv_create_qp_resp *resp, size_t resp_size)
 {
+	printf("#### ibv_cmd_open_qp ####\n");
+	fflush(stdout);
+
 	struct verbs_xrcd *xrcd;
 	IBV_INIT_CMD_RESP(cmd, cmd_size, OPEN_QP, resp, resp_size);
 
@@ -770,8 +1148,8 @@ int ibv_cmd_open_qp(struct ibv_context *context, struct verbs_qp *qp,
 	cmd->qpn         = attr->qp_num;
 	cmd->qp_type     = attr->qp_type;
 
-	if (write(context->cmd_fd, cmd, cmd_size) != cmd_size)
-		return errno;
+	/*if (write(context->cmd_fd, cmd, cmd_size) != cmd_size)
+		return errno;*/
 
 	VALGRIND_MAKE_MEM_DEFINED(resp, resp_size);
 
@@ -802,14 +1180,27 @@ int ibv_cmd_query_qp(struct ibv_qp *qp, struct ibv_qp_attr *attr,
 		     struct ibv_qp_init_attr *init_attr,
 		     struct ibv_query_qp *cmd, size_t cmd_size)
 {
+	printf("#### ibv_cmd_query_qp ####\n");
+	fflush(stdout);
+
 	struct ibv_query_qp_resp resp;
 
 	IBV_INIT_CMD_RESP(cmd, cmd_size, QUERY_QP, &resp, sizeof resp);
 	cmd->qp_handle = qp->handle;
 	cmd->attr_mask = attr_mask;
 
-	if (write(qp->context->cmd_fd, cmd, cmd_size) != cmd_size)
-		return errno;
+	/*if (write(qp->context->cmd_fd, cmd, cmd_size) != cmd_size)
+		return errno;*/
+
+        struct IBV_QUERY_QP_REQ req_body;
+        struct IBV_QUERY_QP_RSP rsp;
+        int rsp_size;
+
+	memset(req_body.cmd, 0, 100);
+	memcpy(req_body.cmd, cmd, cmd_size);
+	req_body.cmd_size = cmd_size;
+        request_router(IBV_QUERY_QP, &req_body, &rsp, &rsp_size);
+	memcpy(&resp, &rsp.resp, sizeof resp);
 
 	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);
 
@@ -884,279 +1275,430 @@ int ibv_cmd_modify_qp(struct ibv_qp *qp, struct ibv_qp_attr *attr,
 		      int attr_mask,
 		      struct ibv_modify_qp *cmd, size_t cmd_size)
 {
-	IBV_INIT_CMD(cmd, cmd_size, MODIFY_QP);
-
-	cmd->qp_handle 		 = qp->handle;
-	cmd->attr_mask 		 = attr_mask;
-	cmd->qkey 		 = attr->qkey;
-	cmd->rq_psn 		 = attr->rq_psn;
-	cmd->sq_psn 		 = attr->sq_psn;
-	cmd->dest_qp_num 	 = attr->dest_qp_num;
-	cmd->qp_access_flags 	 = attr->qp_access_flags;
-	cmd->pkey_index		 = attr->pkey_index;
-	cmd->alt_pkey_index 	 = attr->alt_pkey_index;
-	cmd->qp_state 		 = attr->qp_state;
-	cmd->cur_qp_state 	 = attr->cur_qp_state;
-	cmd->path_mtu 		 = attr->path_mtu;
-	cmd->path_mig_state 	 = attr->path_mig_state;
-	cmd->en_sqd_async_notify = attr->en_sqd_async_notify;
-	cmd->max_rd_atomic 	 = attr->max_rd_atomic;
-	cmd->max_dest_rd_atomic  = attr->max_dest_rd_atomic;
-	cmd->min_rnr_timer 	 = attr->min_rnr_timer;
-	cmd->port_num 		 = attr->port_num;
-	cmd->timeout 		 = attr->timeout;
-	cmd->retry_cnt 		 = attr->retry_cnt;
-	cmd->rnr_retry 		 = attr->rnr_retry;
-	cmd->alt_port_num 	 = attr->alt_port_num;
-	cmd->alt_timeout 	 = attr->alt_timeout;
-
-	memcpy(cmd->dest.dgid, attr->ah_attr.grh.dgid.raw, 16);
-	cmd->dest.flow_label 	    = attr->ah_attr.grh.flow_label;
-	cmd->dest.dlid 		    = attr->ah_attr.dlid;
-	cmd->dest.reserved	    = 0;
-	cmd->dest.sgid_index 	    = attr->ah_attr.grh.sgid_index;
-	cmd->dest.hop_limit 	    = attr->ah_attr.grh.hop_limit;
-	cmd->dest.traffic_class     = attr->ah_attr.grh.traffic_class;
-	cmd->dest.sl 		    = attr->ah_attr.sl;
-	cmd->dest.src_path_bits     = attr->ah_attr.src_path_bits;
-	cmd->dest.static_rate 	    = attr->ah_attr.static_rate;
-	cmd->dest.is_global 	    = attr->ah_attr.is_global;
-	cmd->dest.port_num 	    = attr->ah_attr.port_num;
-
-	memcpy(cmd->alt_dest.dgid, attr->alt_ah_attr.grh.dgid.raw, 16);
-	cmd->alt_dest.flow_label    = attr->alt_ah_attr.grh.flow_label;
-	cmd->alt_dest.dlid 	    = attr->alt_ah_attr.dlid;
-	cmd->alt_dest.reserved	    = 0;
-	cmd->alt_dest.sgid_index    = attr->alt_ah_attr.grh.sgid_index;
-	cmd->alt_dest.hop_limit     = attr->alt_ah_attr.grh.hop_limit;
-	cmd->alt_dest.traffic_class = attr->alt_ah_attr.grh.traffic_class;
-	cmd->alt_dest.sl 	    = attr->alt_ah_attr.sl;
-	cmd->alt_dest.src_path_bits = attr->alt_ah_attr.src_path_bits;
-	cmd->alt_dest.static_rate   = attr->alt_ah_attr.static_rate;
-	cmd->alt_dest.is_global     = attr->alt_ah_attr.is_global;
-	cmd->alt_dest.port_num 	    = attr->alt_ah_attr.port_num;
-
-	cmd->reserved[0] = cmd->reserved[1] = 0;
-
-	if (write(qp->context->cmd_fd, cmd, cmd_size) != cmd_size)
-		return errno;
+	struct IBV_MODIFY_QP_REQ req_body;
+	memcpy(&req_body.attr, attr, sizeof(struct ibv_qp_attr));
+	req_body.attr_mask = attr_mask;
+	req_body.handle = qp->handle;
+	
+	struct IBV_MODIFY_QP_RSP rsp;
+	int rsp_size;
+	request_router(IBV_MODIFY_QP, &req_body, &rsp, &rsp_size);
 
 	if (attr_mask & IBV_QP_STATE)
-		qp->state = attr->qp_state;
+        qp->state = attr->qp_state;
 
-	return 0;
+    	if (PRINT_LOG)
+    	{
+    		printf("QP in req: %d, and QP in rsp: %d. size of attr = %d\n", qp->handle, rsp.handle, sizeof(struct ibv_qp_attr));
+    		fflush(stdout);
+    	}
+
+	if (rsp.ret)
+		errno = rsp.ret;
+	return rsp.ret;
 }
 
 int ibv_cmd_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
 		      struct ibv_send_wr **bad_wr)
-{
-	struct ibv_post_send     *cmd;
-	struct ibv_post_send_resp resp;
+{	
+	//struct timespec st, et, stt, ett;
+	//int time_us;
+	//clock_gettime(CLOCK_REALTIME, &st);
+	//struct ibv_post_send_resp resp;
 	struct ibv_send_wr       *i;
-	struct ibv_kern_send_wr  *n, *tmp;
+	struct ibv_send_wr       *n, *tmp = NULL;
 	struct ibv_sge           *s;
-	unsigned                  wr_count = 0;
-	unsigned                  sge_count = 0;
-	int                       cmd_size;
-	int                       ret = 0;
+	uint32_t				 *ah, ah_count = 0;
+	uint32_t                 wr_count = 0, sge_count = 0, ret_errno;
+	int                       j;
+
+	char                      *mr, *shm, *addr;
+    struct mr_shm             *p;
+    struct CtrlShmPiece       *csp = qp_shm_map[ibqp->handle];
+    pthread_mutex_t           *csp_mtx = &(qp_shm_mtx_map[ibqp->handle]);
+	struct FfrRequestHeader   *header = (struct FfrRequestHeader*)(csp->req);
+	struct ibv_post_send      *cmd = (struct ibv_post_send*)(csp->req + sizeof(struct FfrRequestHeader));
+	struct IBV_POST_SEND_RSP  *rsp = (struct IBV_POST_SEND_RSP*)(csp->rsp + sizeof(struct FfrResponseHeader));
+	
+
+    if (PRINT_LOG)
+    {
+    	printf("#### ibv_cmd_post_send ####\n");
+		fflush(stdout);
+    }
 
 	for (i = wr; i; i = i->next) {
 		wr_count++;
 		sge_count += i->num_sge;
 	}
 
-	cmd_size = sizeof *cmd + wr_count * sizeof *n + sge_count * sizeof *s;
-	cmd  = alloca(cmd_size);
+	if (ibqp->qp_type == IBV_QPT_UD) {
+		ah_count = wr_count;
+	}
 
-	IBV_INIT_CMD_RESP(cmd, cmd_size, POST_SEND, &resp, sizeof resp);
+	// Entering critical section
+	pthread_mutex_lock(csp_mtx);
+
+	header->client_id = ffr_client_id;
+	header->func = IBV_POST_SEND;
+	header->body_size = sizeof *cmd + wr_count * sizeof *n + sge_count * sizeof *s + ah_count * sizeof(uint32_t);
+
+	//IBV_INIT_CMD_RESP(cmd, req_body.wr_size, POST_SEND, &resp, sizeof resp);
 	cmd->qp_handle = ibqp->handle;
 	cmd->wr_count  = wr_count;
 	cmd->sge_count = sge_count;
-	cmd->wqe_size  = sizeof *n;
 
-	n = (struct ibv_kern_send_wr *) ((void *) cmd + sizeof *cmd);
+	n = (struct ibv_send_wr *) ((void *) cmd + sizeof *cmd);
 	s = (struct ibv_sge *) (n + wr_count);
+	ah = (uint32_t*) (s + sge_count);
 
 	tmp = n;
 	for (i = wr; i; i = i->next) {
-		tmp->wr_id 	= i->wr_id;
-		tmp->num_sge 	= i->num_sge;
-		tmp->opcode 	= i->opcode;
-		tmp->send_flags = i->send_flags;
-		tmp->imm_data 	= i->imm_data;
+		memcpy(tmp, i, sizeof(struct ibv_send_wr));
 		if (ibqp->qp_type == IBV_QPT_UD) {
-			tmp->wr.ud.ah 	       = i->wr.ud.ah->handle;
-			tmp->wr.ud.remote_qpn  = i->wr.ud.remote_qpn;
-			tmp->wr.ud.remote_qkey = i->wr.ud.remote_qkey;
-		} else {
-			switch (i->opcode) {
-			case IBV_WR_RDMA_WRITE:
-			case IBV_WR_RDMA_WRITE_WITH_IMM:
-			case IBV_WR_RDMA_READ:
-				tmp->wr.rdma.remote_addr =
-					i->wr.rdma.remote_addr;
-				tmp->wr.rdma.rkey = i->wr.rdma.rkey;
-				break;
-			case IBV_WR_ATOMIC_CMP_AND_SWP:
-			case IBV_WR_ATOMIC_FETCH_AND_ADD:
-				tmp->wr.atomic.remote_addr =
-					i->wr.atomic.remote_addr;
-				tmp->wr.atomic.compare_add =
-					i->wr.atomic.compare_add;
-				tmp->wr.atomic.swap = i->wr.atomic.swap;
-				tmp->wr.atomic.rkey = i->wr.atomic.rkey;
-				break;
-			default:
-				break;
-			}
+			*ah = i->wr.ud.ah->handle;
+			ah = ah + 1;
 		}
 
 		if (tmp->num_sge) {
+			/* freeflow copy data */
 			memcpy(s, i->sg_list, tmp->num_sge * sizeof *s);
+			for (j = 0; j < tmp->num_sge; j++) {
+
+                //clock_gettime(CLOCK_REALTIME, &stt);
+				p = (struct mr_shm*)mempool_get(map_lkey_to_mrshm, s[j].lkey);
+                //clock_gettime(CLOCK_REALTIME, &ett);
+                //time_us = (ett.tv_sec - stt.tv_sec) * 1000000 +
+                //(ett.tv_nsec - stt.tv_nsec) / 1000;
+                //if (time_us >= 5)
+				//printf("mempool_get --> %d\n", time_us);
+				//fflush(stdout);
+
+				mr = p->mr;
+				shm = p->shm_ptr;
+
+				addr = (char*)(s[j].addr);
+				if (shm + (addr - mr) != addr)
+				{
+					memcpy(shm + (addr - mr), addr, s[j].length);	
+				}
+
+				s[j].addr = addr - mr;
+
+				if (PRINT_LOG)
+				{
+					printf("!!!!!!!!!! length=%u,addr=%lu,lkey=%u,mr_ptr=%lu,shm_ptr=%lu,original_addr=%lu\n", s[j].length, s[j].addr, s[j].lkey, (uint64_t)mr, (uint64_t)shm, (uint64_t)addr);
+					fflush(stdout);
+					printf("wr=%lu, sge=%lu, sizeof send_wr=%lu\n", (uint64_t)n, (uint64_t)s, sizeof(*n));
+					fflush(stdout);
+				}
+			}
+
 			s += tmp->num_sge;
 		}
 
 		tmp++;
 	}
 
-	resp.bad_wr = 0;
-	if (write(ibqp->context->cmd_fd, cmd, cmd_size) != cmd_size)
-		ret = errno;
+        uint8_t disable_fastpath = 0;
+        if (!getenv("DISABLE_FASTPATH"))
+        {
+            disable_fastpath = 0;
+        }
+        else
+        {
+            disable_fastpath = atoi(getenv("DISABLE_FASTPATH"));
+        }
 
-	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);
-
-	wr_count = resp.bad_wr;
+	if (disable_fastpath)
+	{
+		struct IBV_POST_SEND_REQ req_body;
+                req_body.wr_size = header->body_size;
+		req_body.wr = cmd;
+		int rsp_size;
+		request_router(IBV_POST_SEND, &req_body, rsp, &rsp_size);
+	}
+	else
+		request_router_shm(csp);
+ 
+	wr_count = rsp->bad_wr;
 	if (wr_count) {
 		i = wr;
 		while (--wr_count)
 			i = i->next;
 		*bad_wr = i;
-	} else if (ret)
+	} else if (rsp->ret_errno) {
 		*bad_wr = wr;
+	}
+	
+	ret_errno = rsp->ret_errno;
+	wmb();
+	csp->state = IDLE;
+	pthread_mutex_unlock(csp_mtx);
 
-	return ret;
+	//clock_gettime(CLOCK_REALTIME, &et);
+    //    time_us = (et.tv_sec - st.tv_sec) * 1000000 +
+    //                        (et.tv_nsec - st.tv_nsec) / 1000;
+
+	//if (PRINT_LOG)
+	//if (time_us >= 5)
+	//{
+	//	printf("--------------> post_send_delay = %d us, wr_count = %d, sge_count = %d\n", time_us, wr_count, sge_count);
+	//	fflush(stdout);
+	//}
+
+	return ret_errno;
 }
 
 int ibv_cmd_post_recv(struct ibv_qp *ibqp, struct ibv_recv_wr *wr,
 		      struct ibv_recv_wr **bad_wr)
 {
-	struct ibv_post_recv     *cmd;
-	struct ibv_post_recv_resp resp;
-	struct ibv_recv_wr       *i;
-	struct ibv_kern_recv_wr  *n, *tmp;
-	struct ibv_sge           *s;
-	unsigned                  wr_count = 0;
-	unsigned                  sge_count = 0;
-	int                       cmd_size;
-	int                       ret = 0;
+	//struct ibv_post_recv_resp resp;
+	struct ibv_recv_wr        *i;
+	struct ibv_recv_wr        *n = NULL, *tmp = NULL;
+	struct ibv_sge            *s;
+	uint32_t                  wr_count = 0, sge_count = 0, ret_errno;
+	int                       j, wr_index;
+	char                      *mr = NULL, *addr = NULL;
+	struct mr_shm             *p;
+	struct wr                 *wr_p;
+	struct sge_record         *sge_p;
+	struct wr_queue           *wr_queue;
+    struct CtrlShmPiece       *csp = qp_shm_map[ibqp->handle];
+    pthread_mutex_t           *csp_mtx = &(qp_shm_mtx_map[ibqp->handle]);
+	struct FfrRequestHeader   *header = (struct FfrRequestHeader*)(csp->req);
+	struct ibv_post_recv      *cmd = (struct ibv_post_recv*)(csp->req + sizeof(struct FfrRequestHeader));
+	struct IBV_POST_RECV_RSP  *rsp = (struct IBV_POST_RECV_RSP*)(csp->rsp + sizeof(struct FfrResponseHeader));
 
 	for (i = wr; i; i = i->next) {
 		wr_count++;
 		sge_count += i->num_sge;
 	}
 
-	cmd_size = sizeof *cmd + wr_count * sizeof *n + sge_count * sizeof *s;
-	cmd  = alloca(cmd_size);
+	// Entering critical section
+	pthread_mutex_lock(csp_mtx);
 
-	IBV_INIT_CMD_RESP(cmd, cmd_size, POST_RECV, &resp, sizeof resp);
+	header->client_id = ffr_client_id;
+	header->func = IBV_POST_RECV;
+	header->body_size = sizeof *cmd + wr_count * sizeof *n + sge_count * sizeof *s;
+
+	// IBV_INIT_CMD_RESP(cmd, req_body.wr_size, POST_RECV, &resp, sizeof resp);
 	cmd->qp_handle = ibqp->handle;
 	cmd->wr_count  = wr_count;
 	cmd->sge_count = sge_count;
-	cmd->wqe_size  = sizeof *n;
 
-	n = (struct ibv_kern_recv_wr *) ((void *) cmd + sizeof *cmd);
+	n = (struct ibv_recv_wr *) ((void *) cmd + sizeof *cmd);
 	s = (struct ibv_sge *) (n + wr_count);
+
+	wr_queue = map_cq_to_wr_queue[ibqp->recv_cq->handle];
 
 	tmp = n;
 	for (i = wr; i; i = i->next) {
-		tmp->wr_id   = i->wr_id;
-		tmp->num_sge = i->num_sge;
+		memcpy(tmp, i, sizeof(struct ibv_recv_wr));
+
+		// We are already in critical section
+		//pthread_spin_lock(&(wr_queue->head_lock));
+		wr_index = wr_queue->head;
+		wr_queue->head++;
+		if (wr_queue->head >= WR_QUEUE_SIZE) {
+			wr_queue->head = 0;
+		}
+		//pthread_spin_unlock(&(wr_queue->head_lock));
+
+		wr_p = wr_queue->queue + wr_index;
+		wr_p->sge_num = tmp->num_sge;
 
 		if (tmp->num_sge) {
+			wr_p->sge_queue = malloc(sizeof(struct sge_record) * tmp->num_sge);
+			sge_p = (struct sge_record*)wr_p->sge_queue;
+
+			/* freeflow keeps track of offsets */
+			tmp->sg_list = s;
 			memcpy(s, i->sg_list, tmp->num_sge * sizeof *s);
+
+			for (j = 0; j < tmp->num_sge; j++) {
+				p = (struct mr_shm*)mempool_get(map_lkey_to_mrshm, s[j].lkey);
+				mr = p->mr;
+				
+				addr = (char*)(s[j].addr);
+				s[j].addr = addr - mr;
+
+				sge_p->length = s[j].length;
+				sge_p->mr_addr = mr + s[j].addr;
+				sge_p->shm_addr = p->shm_ptr + s[j].addr;
+				sge_p++;
+			}
 			s += tmp->num_sge;
 		}
 
 		tmp++;
 	}
 
-	resp.bad_wr = 0;
-	if (write(ibqp->context->cmd_fd, cmd, cmd_size) != cmd_size)
-		ret = errno;
+        uint8_t disable_fastpath = 0;
+        if (!getenv("DISABLE_FASTPATH"))
+        {
+            disable_fastpath = 0;
+        }
+        else
+        {
+            disable_fastpath = atoi(getenv("DISABLE_FASTPATH"));
+        }
 
-	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);
-
-	wr_count = resp.bad_wr;
+	if (disable_fastpath)
+	{
+		struct IBV_POST_RECV_REQ req_body;
+                req_body.wr_size = header->body_size;
+		req_body.wr = cmd;
+		int rsp_size;
+		request_router(IBV_POST_RECV, &req_body, rsp, &rsp_size);
+	}
+	else
+		request_router_shm(csp);
+ 
+	wr_count = rsp->bad_wr;
 	if (wr_count) {
 		i = wr;
 		while (--wr_count)
 			i = i->next;
 		*bad_wr = i;
-	} else if (ret)
+	} else if (rsp->ret_errno) {
 		*bad_wr = wr;
+	}
 
-	return ret;
+	ret_errno = rsp->ret_errno;
+	wmb();
+	csp->state = IDLE;
+	pthread_mutex_unlock(csp_mtx);
+
+	return ret_errno;
 }
 
 int ibv_cmd_post_srq_recv(struct ibv_srq *srq, struct ibv_recv_wr *wr,
 		      struct ibv_recv_wr **bad_wr)
 {
-	struct ibv_post_srq_recv *cmd;
-	struct ibv_post_srq_recv_resp resp;
-	struct ibv_recv_wr       *i;
-	struct ibv_kern_recv_wr  *n, *tmp;
-	struct ibv_sge           *s;
-	unsigned                  wr_count = 0;
-	unsigned                  sge_count = 0;
-	int                       cmd_size;
-	int                       ret = 0;
+	if (PRINT_LOG)
+	{
+		printf("#### ibv_cmd_post_srq_recv ####\n");
+		fflush(stdout);
+	}
+
+	struct ibv_recv_wr        *i;
+	struct ibv_recv_wr        *n = NULL, *tmp = NULL;
+	struct ibv_sge            *s;
+	uint32_t                  wr_count = 0, sge_count = 0, ret_errno;
+	int                       j, wr_index;
+	char                      *mr = NULL, *addr = NULL;
+	struct mr_shm             *p;
+	struct wr                 *wr_p;
+	struct sge_record         *sge_p;
+	struct wr_queue           *wr_queue;
+    struct CtrlShmPiece       *csp = srq_shm_map[srq->handle];
+    pthread_spinlock_t        *csp_mtx = &(map_srq_to_wr_queue[srq->handle]->head_lock);
+	struct FfrRequestHeader   *header = (struct FfrRequestHeader*)(csp->req);
+	struct ibv_post_srq_recv      *cmd = (struct ibv_post_srq_recv*)(csp->req + sizeof(struct FfrRequestHeader));
+	struct IBV_POST_SRQ_RECV_RSP  *rsp = (struct IBV_POST_SRQ_RECV_RSP*)(csp->rsp + sizeof(struct FfrResponseHeader));
 
 	for (i = wr; i; i = i->next) {
 		wr_count++;
 		sge_count += i->num_sge;
 	}
 
-	cmd_size = sizeof *cmd + wr_count * sizeof *n + sge_count * sizeof *s;
-	cmd  = alloca(cmd_size);
+	// Entering critical section
+	pthread_spin_lock(csp_mtx);
 
-	IBV_INIT_CMD_RESP(cmd, cmd_size, POST_SRQ_RECV, &resp, sizeof resp);
+	header->client_id = ffr_client_id;
+	header->func = IBV_POST_SRQ_RECV;
+	header->body_size = sizeof *cmd + wr_count * sizeof *n + sge_count * sizeof *s;
+
 	cmd->srq_handle = srq->handle;
 	cmd->wr_count  = wr_count;
 	cmd->sge_count = sge_count;
-	cmd->wqe_size  = sizeof *n;
+	// cmd->wqe_size  = sizeof *n;
 
-	n = (struct ibv_kern_recv_wr *) ((void *) cmd + sizeof *cmd);
+	n = (struct ibv_recv_wr *) ((void *) cmd + sizeof *cmd);
 	s = (struct ibv_sge *) (n + wr_count);
+
+	wr_queue = map_srq_to_wr_queue[srq->handle];
 
 	tmp = n;
 	for (i = wr; i; i = i->next) {
-		tmp->wr_id = i->wr_id;
-		tmp->num_sge = i->num_sge;
+		memcpy(tmp, i, sizeof(struct ibv_recv_wr));
+
+		// We are already in critical section
+		//pthread_spin_lock(&(wr_queue->head_lock));
+		wr_index = wr_queue->head;
+		wr_queue->head++;
+		if (wr_queue->head >= WR_QUEUE_SIZE) {
+			wr_queue->head = 0;
+		}
+		//pthread_spin_unlock(&(wr_queue->head_lock));
+		wr_p = wr_queue->queue + wr_index;
+
+		wr_p->sge_num = tmp->num_sge;
 
 		if (tmp->num_sge) {
+			/* freeflow keeps track of offsets */
+			wr_p->sge_queue = malloc(sizeof(struct sge_record) * tmp->num_sge);
+			sge_p = (struct sge_record*)wr_p->sge_queue;
+
+			tmp->sg_list = s;
 			memcpy(s, i->sg_list, tmp->num_sge * sizeof *s);
+
+			for (j = 0; j < tmp->num_sge; j++) {
+				p = (struct mr_shm*)mempool_get(map_lkey_to_mrshm, s[j].lkey);
+				mr = p->mr;
+				
+				addr = (char*)(s[j].addr);
+				s[j].addr = addr - mr;
+
+				sge_p->length = s[j].length;
+				sge_p->mr_addr = mr + s[j].addr;
+				sge_p->shm_addr = p->shm_ptr + s[j].addr;
+				sge_p++;
+			}
 			s += tmp->num_sge;
 		}
 
 		tmp++;
 	}
 
-	resp.bad_wr = 0;
-	if (write(srq->context->cmd_fd, cmd, cmd_size) != cmd_size)
-		ret = errno;
+        uint8_t disable_fastpath = 0;
+        if (!getenv("DISABLE_FASTPATH"))
+        {
+            disable_fastpath = 0;
+        }
+        else
+        {
+            disable_fastpath = atoi(getenv("DISABLE_FASTPATH"));
+        }
 
-	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);
+	if (disable_fastpath)
+	{
+		struct IBV_POST_SRQ_RECV_REQ req_body;
+                req_body.wr_size = header->body_size;
+		req_body.wr = cmd;
+		int rsp_size;
+		request_router(IBV_POST_SRQ_RECV, &req_body, rsp, &rsp_size);
+	}
+	else
+		request_router_shm(csp);
 
-	wr_count = resp.bad_wr;
+	wr_count = rsp->bad_wr;
 	if (wr_count) {
 		i = wr;
 		while (--wr_count)
 			i = i->next;
 		*bad_wr = i;
-	} else if (ret)
+	} else if (rsp->ret_errno) {
 		*bad_wr = wr;
+	}
 
-	return ret;
+	ret_errno = rsp->ret_errno;
+	wmb();
+	csp->state = IDLE;
+	pthread_spin_unlock(csp_mtx);
+
+	return ret_errno;
 }
 
 int ibv_cmd_create_ah(struct ibv_pd *pd, struct ibv_ah *ah,
@@ -1164,72 +1706,93 @@ int ibv_cmd_create_ah(struct ibv_pd *pd, struct ibv_ah *ah,
 		      struct ibv_create_ah_resp *resp,
 		      size_t resp_size)
 {
-	struct ibv_create_ah      cmd;
+	if (PRINT_LOG)
+	{
+		printf("#### ibv_cmd_create_ah ####\n");
+		fflush(stdout);
+	}
 
-	IBV_INIT_CMD_RESP(&cmd, sizeof cmd, CREATE_AH, resp, resp_size);
-	cmd.user_handle            = (uintptr_t) ah;
-	cmd.pd_handle              = pd->handle;
-	cmd.attr.dlid              = attr->dlid;
-	cmd.attr.sl                = attr->sl;
-	cmd.attr.src_path_bits     = attr->src_path_bits;
-	cmd.attr.static_rate       = attr->static_rate;
-	cmd.attr.is_global         = attr->is_global;
-	cmd.attr.port_num          = attr->port_num;
-	cmd.attr.grh.flow_label    = attr->grh.flow_label;
-	cmd.attr.grh.sgid_index    = attr->grh.sgid_index;
-	cmd.attr.grh.hop_limit     = attr->grh.hop_limit;
-	cmd.attr.grh.traffic_class = attr->grh.traffic_class;
-	cmd.reserved               = 0;
-	memcpy(cmd.attr.grh.dgid, attr->grh.dgid.raw, 16);
+	printf("attr->dlid; = %d\n", attr->dlid);
+	fflush(stdout);
+	printf("attr->sl; = %d\n", attr->sl);
+	fflush(stdout);
+	printf("attr->src_path_bits; = %d\n", attr->src_path_bits);
+	fflush(stdout);
+	printf("attr->static_rate; = %d\n", attr->static_rate);
+	fflush(stdout);
+	printf("attr->is_global; = %d\n", attr->is_global);
+	fflush(stdout);
+	printf("attr->port_num; = %d\n", attr->port_num);
+	fflush(stdout);
+	printf("attr->grh.flow_label; = %d\n", attr->grh.flow_label);
+	fflush(stdout);
+	printf("attr->grh.sgid_index; = %d\n", attr->grh.sgid_index);
+	fflush(stdout);
+	printf("attr->grh.hop_limit; = %d\n", attr->grh.hop_limit);
+	printf("attr->grh.traffic_class; = %d\n", attr->grh.traffic_class);
+	fflush(stdout);
 
-	if (write(pd->context->cmd_fd, &cmd, sizeof cmd) != sizeof cmd)
-		return errno;
+	struct IBV_CREATE_AH_REQ req_body;
+	memcpy(&(req_body.ah_attr), attr, sizeof(struct ibv_ah_attr));
+	req_body.pd_handle = pd->handle;
+	
+	struct IBV_CREATE_AH_RSP rsp;
+	int rsp_size;
+	request_router(IBV_CREATE_AH, &req_body, &rsp, &rsp_size);
 
-	VALGRIND_MAKE_MEM_DEFINED(resp, resp_size);
-
-	ah->handle  = resp->handle;
+	ah->handle = rsp.ah_handle;
 	ah->context = pd->context;
+	ah->pd = pd;
 
-	return 0;
+	return rsp.ret;
 }
 
 int ibv_cmd_destroy_ah(struct ibv_ah *ah)
 {
-	struct ibv_destroy_ah cmd;
+	if (PRINT_LOG)
+	{
+		printf("#### ibv_cmd_destroy_ah ####\n");
+		fflush(stdout);
+	}
 
-	IBV_INIT_CMD(&cmd, sizeof cmd, DESTROY_AH);
-	cmd.ah_handle = ah->handle;
+	struct IBV_DESTROY_AH_REQ req_body;
+	req_body.ah_handle = ah->handle;
+	
+	struct IBV_DESTROY_AH_RSP rsp;
+	int rsp_size;
+	request_router(IBV_DESTROY_AH, &req_body, &rsp, &rsp_size);
 
-	if (write(ah->context->cmd_fd, &cmd, sizeof cmd) != sizeof cmd)
-		return errno;
-
-	return 0;
+	return rsp.ret;
 }
 
 int ibv_cmd_destroy_qp(struct ibv_qp *qp)
 {
-	struct ibv_destroy_qp      cmd;
-	struct ibv_destroy_qp_resp resp;
+	if (PRINT_LOG)
+	{
+		printf("#### ibv_cmd_destroy_qp ####\n");
+		fflush(stdout);
+	}
 
-	IBV_INIT_CMD_RESP(&cmd, sizeof cmd, DESTROY_QP, &resp, sizeof resp);
-	cmd.qp_handle = qp->handle;
-	cmd.reserved  = 0;
+	struct IBV_DESTROY_QP_REQ req_body;
+	req_body.qp_handle = qp->handle;
+	
+	struct IBV_DESTROY_QP_RSP rsp;
+	int rsp_size;
+	request_router(IBV_DESTROY_QP, &req_body, &rsp, &rsp_size);	
 
-	if (write(qp->context->cmd_fd, &cmd, sizeof cmd) != sizeof cmd)
-		return errno;
+	// TODO: clean up mempool
 
-	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof resp);
-
-	pthread_mutex_lock(&qp->mutex);
-	while (qp->events_completed != resp.events_reported)
-		pthread_cond_wait(&qp->cond, &qp->mutex);
-	pthread_mutex_unlock(&qp->mutex);
-
-	return 0;
+	return rsp.ret;
 }
 
 int ibv_cmd_attach_mcast(struct ibv_qp *qp, const union ibv_gid *gid, uint16_t lid)
 {
+	//if (PRINT_LOG)
+	//{
+		printf("#### ibv_cmd_attach_mcast ####\n");
+		fflush(stdout);
+	//}
+
 	struct ibv_attach_mcast cmd;
 
 	IBV_INIT_CMD(&cmd, sizeof cmd, ATTACH_MCAST);
@@ -1238,14 +1801,20 @@ int ibv_cmd_attach_mcast(struct ibv_qp *qp, const union ibv_gid *gid, uint16_t l
 	cmd.mlid      = lid;
 	cmd.reserved  = 0;
 
-	if (write(qp->context->cmd_fd, &cmd, sizeof cmd) != sizeof cmd)
-		return errno;
+	/*if (write(qp->context->cmd_fd, &cmd, sizeof cmd) != sizeof cmd)
+		return errno;*/
 
 	return 0;
 }
 
 int ibv_cmd_detach_mcast(struct ibv_qp *qp, const union ibv_gid *gid, uint16_t lid)
 {
+	//if (PRINT_LOG)
+	//{
+		printf("#### ibv_cmd_detach_mcast ####\n");
+		fflush(stdout);
+	//}
+
 	struct ibv_detach_mcast cmd;
 
 	IBV_INIT_CMD(&cmd, sizeof cmd, DETACH_MCAST);
@@ -1254,8 +1823,8 @@ int ibv_cmd_detach_mcast(struct ibv_qp *qp, const union ibv_gid *gid, uint16_t l
 	cmd.mlid      = lid;
 	cmd.reserved  = 0;
 
-	if (write(qp->context->cmd_fd, &cmd, sizeof cmd) != sizeof cmd)
-		return errno;
+	/*if (write(qp->context->cmd_fd, &cmd, sizeof cmd) != sizeof cmd)
+		return errno;*/
 
 	return 0;
 }
@@ -1475,6 +2044,12 @@ static struct ibv_flow *cmd_create_flow(struct ibv_qp *qp,
 					void *ib_spec,
 					int is_exp)
 {
+	if (PRINT_LOG)
+	{
+		printf("### cmd_create_flow ###\n");
+		fflush(stdout);
+	}
+
 	struct ibv_create_flow *cmd;
 	struct ibv_create_flow_resp resp;
 	struct ibv_flow *flow_id;
@@ -1505,12 +2080,17 @@ static struct ibv_flow *cmd_create_flow(struct ibv_qp *qp,
 	cmd->flow_attr.flags = flow_attr->flags;
 
 	kern_spec = cmd + 1;
+        //struct ibv_kern_spec *ib_spec_ptr = NULL;
 	for (i = 0; i < flow_attr->num_of_specs; i++) {
 		err = ib_spec_to_kern_spec(ib_spec, kern_spec, is_exp);
 		if (err) {
 			errno = err;
 			goto err;
 		}
+
+		//ib_spec_ptr = kern_spec;
+                //printf("@@@ spec.size=%d, spec.type=%x\n", ib_spec_ptr->hdr.size, ib_spec_ptr->hdr.type);
+		
 		cmd->flow_attr.size +=
 			((struct ibv_kern_spec *)kern_spec)->hdr.size;
 		kern_spec += ((struct ibv_kern_spec *)kern_spec)->hdr.size;
@@ -1525,8 +2105,29 @@ static struct ibv_flow *cmd_create_flow(struct ibv_qp *qp,
 		IBV_INIT_CMD_RESP_EXP(CREATE_FLOW, cmd, written_size, 0,
 				      &resp, sizeof(resp), 0);
 
-	if (write(qp->context->cmd_fd, cmd, written_size) != written_size)
-		goto err;
+	/*if (write(qp->context->cmd_fd, cmd, written_size) != written_size)
+		goto err;*/
+
+        //void *ptr = cmd + 1;
+        //printf("exp_flow=%d, written_size=%d, num_of_specs: %d\n", exp_flow, written_size, cmd->flow_attr.num_of_specs);
+
+        //int iii = 0;
+        //for (iii = 0; iii < cmd->flow_attr.num_of_specs; iii++)
+        //{
+        //        printf("spec.size=%d, spec.type=%x\n", ((struct ibv_kern_spec*)ptr)->hdr.size, ((struct ibv_kern_spec*)ptr)->hdr.type);
+        //        ptr = ptr + (((struct ibv_kern_spec*)ptr)->hdr.size);
+        //}
+
+        struct IBV_CREATE_FLOW_REQ req_body;
+        struct IBV_CREATE_FLOW_RSP rsp;
+        int rsp_size;
+
+	memset(&req_body.cmd, 0, 1024);
+	memcpy(&req_body.cmd, cmd, written_size);
+	req_body.written_size = written_size;
+	req_body.exp_flow = exp_flow;
+        request_router(IBV_CREATE_FLOW, &req_body, &rsp, &rsp_size);
+	memcpy(&resp, &rsp.resp, sizeof resp);
 
 	VALGRIND_MAKE_MEM_DEFINED(&resp, sizeof(resp));
 
@@ -1541,6 +2142,12 @@ err:
 struct ibv_exp_flow *ibv_exp_cmd_create_flow(struct ibv_qp *qp,
 					     struct ibv_exp_flow_attr *flow_attr)
 {
+	//if (PRINT_LOG)
+	//{
+		printf("#### ibv_exp_cmd_create_flow ####\n");
+		fflush(stdout);
+	//}
+
 	void *ib_spec = flow_attr + 1;
 	struct ibv_flow *fl;
 
@@ -1555,6 +2162,12 @@ struct ibv_exp_flow *ibv_exp_cmd_create_flow(struct ibv_qp *qp,
 struct ibv_flow *ibv_cmd_create_flow(struct ibv_qp *qp,
 				     struct ibv_flow_attr *flow_attr)
 {
+	//if (PRINT_LOG)
+	{
+		printf("#### ibv_cmd_create_flow ####\n");
+		fflush(stdout);
+	}
+
 	void *ib_spec = flow_attr + 1;
 
 	if (flow_attr->comp_mask) {
@@ -1568,6 +2181,12 @@ struct ibv_flow *ibv_cmd_create_flow(struct ibv_qp *qp,
 
 static int cmd_destroy_flow(uint32_t handle, int cmd_fd)
 {
+	//if (PRINT_LOG)
+	//{
+		printf("#### cmd_destroy_flow ####\n");
+		fflush(stdout);
+	//}
+
 	struct ibv_destroy_flow cmd;
 	int ret = 0;
 
@@ -1575,14 +2194,27 @@ static int cmd_destroy_flow(uint32_t handle, int cmd_fd)
 	IBV_INIT_CMD_EX(&cmd, sizeof(cmd), DESTROY_FLOW);
 	cmd.flow_handle = handle;
 
-	if (write(cmd_fd, &cmd, sizeof(cmd)) != sizeof(cmd))
-		ret = errno;
+	/*if (write(cmd_fd, &cmd, sizeof(cmd)) != sizeof(cmd))
+		ret = errno;*/
 
-	return ret;
+        struct IBV_DESTROY_FLOW_REQ req_body;
+        struct IBV_DESTROY_FLOW_RSP rsp;
+        int rsp_size;
+
+	memcpy(&req_body.cmd, &cmd, sizeof cmd);
+        request_router(IBV_DESTROY_FLOW, &req_body, &rsp, &rsp_size);
+
+	return rsp.ret_errno;
 }
 
 int ibv_exp_cmd_destroy_flow(struct ibv_exp_flow *flow_id)
 {
+	//if (PRINT_LOG)
+	//{
+		printf("#### ibv_exp_cmd_destroy_flow ####\n");
+		fflush(stdout);
+	//}
+
 	int ret = cmd_destroy_flow(flow_id->handle, flow_id->context->cmd_fd);
 	struct ibv_flow *fl = (void *)flow_id - offsetof(struct ibv_flow, context);
 
@@ -1593,6 +2225,12 @@ int ibv_exp_cmd_destroy_flow(struct ibv_exp_flow *flow_id)
 
 int ibv_cmd_destroy_flow(struct ibv_flow *flow_id)
 {
+	//if (PRINT_LOG)
+	//{
+		printf("#### ibv_cmd_destroy_flow ####\n");
+		fflush(stdout);
+	//}
+
 	int ret = cmd_destroy_flow(flow_id->handle, flow_id->context->cmd_fd);
 
 	free(flow_id);

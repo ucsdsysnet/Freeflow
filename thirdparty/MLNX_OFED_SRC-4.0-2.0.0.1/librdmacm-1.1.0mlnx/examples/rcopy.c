@@ -137,11 +137,14 @@ static int msg_recv_hdr(int rs, struct msg_hdr *hdr)
 
 	ret = _recv(rs, (char *) hdr, sizeof *hdr);
 	if (ret != sizeof *hdr)
+	{
 		return -1;
+	}
 
 	if (hdr->version || hdr->len < sizeof *hdr) {
 		printf("invalid version %d or length %d\n",
 		       hdr->version, hdr->len);
+		fflush(stdout);
 		return -1;
 	}
 
@@ -156,9 +159,11 @@ static int msg_get_resp(int rs, struct msg_hdr *msg, uint8_t cmd)
 	if (ret != sizeof *msg)
 		return ret;
 
+
 	if ((msg->len != sizeof *msg) || (msg->command != (cmd | CMD_RESP))) {
-		printf("invalid length %d or bad command response %x:%x\n",
-		       msg->len, msg->command, cmd | CMD_RESP);
+		printf("invalid length %d:%d or bad command response %x:%x\n",
+		       msg->len, sizeof *msg, msg->command, cmd | CMD_RESP);
+		fflush(stdout);
 		return -1;
 	}
 
@@ -174,6 +179,7 @@ static void msg_send_resp(int rs, struct msg_hdr *msg, uint32_t status)
 	resp.len = sizeof resp;
 	resp.data = status;
 	resp.id = msg->id;
+
 	rsend(rs, (char *) &resp, sizeof resp, 0);
 }
 
@@ -265,8 +271,10 @@ static int server_open(int rs, struct msg_hdr *msg)
 out:
 	if (path)
 		free(path);
-
+	
 	msg_send_resp(rs, msg, ret);
+	printf("end of server_open\n");
+	fflush(stdout);
 	return ret;
 }
 
@@ -308,6 +316,7 @@ static int server_write(int rs, struct msg_hdr *msg)
 	}
 
 	ret = _recv(rs, (char *) &bytes, sizeof bytes);
+
 	if (ret != sizeof bytes)
 		goto out;
 
@@ -329,6 +338,7 @@ static int server_write(int rs, struct msg_hdr *msg)
 		printf("...error receiving data\n");
 		ret = (int) len;
 	}
+
 out:
 	msg_send_resp(rs, msg, ret);
 	return ret;
@@ -459,7 +469,10 @@ static int client_open(int rs)
 
 	ret = msg_get_resp(rs, &msg->hdr, CMD_OPEN);
 	if (ret)
+	{
 		goto err3;
+
+	}
 
 	return 0;
 

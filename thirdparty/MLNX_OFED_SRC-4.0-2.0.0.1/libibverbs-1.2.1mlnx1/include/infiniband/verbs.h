@@ -3,6 +3,7 @@
  * Copyright (c) 2004, 2011-2012 Intel Corporation.  All rights reserved.
  * Copyright (c) 2005, 2006, 2007 Cisco Systems, Inc.  All rights reserved.
  * Copyright (c) 2005 PathScale, Inc.  All rights reserved.
+ * Copyright (c) Microsoft Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -36,6 +37,7 @@
 #ifndef INFINIBAND_VERBS_H
 #define INFINIBAND_VERBS_H
 
+#include <stdio.h>
 #include <stdint.h>
 #include <pthread.h>
 #include <stddef.h>
@@ -453,6 +455,10 @@ struct ibv_mr {
 	uint32_t		handle;
 	uint32_t		lkey;
 	uint32_t		rkey;
+
+	char shm_name[100];
+	void *shm_ptr;
+	int shm_fd;
 };
 
 enum ibv_mw_type {
@@ -1300,6 +1306,12 @@ static inline int ibv_close_xrcd(struct ibv_xrcd *xrcd)
  */
 struct ibv_mr *ibv_reg_mr(struct ibv_pd *pd, void *addr,
 			  size_t length, int access);
+
+/**
+ * ibv_reg_mr_ff - Register a memory region in FreeFlow router.
+ */
+struct ibv_mr *ibv_reg_mr_ff(struct ibv_pd *pd, void **addr,
+			  size_t length, int access, char* shm_name);
 
 
 enum ibv_rereg_mr_err_code {

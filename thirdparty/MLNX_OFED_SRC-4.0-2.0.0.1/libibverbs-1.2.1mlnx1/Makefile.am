@@ -12,7 +12,7 @@ libibverbs_version_script = @LIBIBVERBS_VERSION_SCRIPT@
 
 src_libibverbs_la_SOURCES = src/cmd.c src/compat-1_0.c src/device.c src/init.c \
 			    src/marshall.c src/memory.c src/sysfs.c src/verbs.c \
-			    src/enum_strs.c src/cmd_exp.c
+			    src/enum_strs.c src/cmd_exp.c src/freeflow.c
 if ! NO_RESOLVE_NEIGH
 src_libibverbs_la_SOURCES += src/neigh.c
 noinst_HEADERS = src/neigh.h
@@ -109,7 +109,8 @@ libibverbsinclude_HEADERS = include/infiniband/arch.h include/infiniband/driver.
     include/infiniband/kern-abi.h include/infiniband/opcode.h include/infiniband/verbs.h \
     include/infiniband/sa-kern-abi.h include/infiniband/sa.h include/infiniband/marshall.h \
     include/infiniband/ofa_verbs.h include/infiniband/driver_exp.h include/infiniband/kern-abi_exp.h \
-    include/infiniband/verbs_exp.h include/infiniband/peer_ops.h
+    include/infiniband/verbs_exp.h include/infiniband/peer_ops.h include/infiniband/freeflow.h \
+    include/infiniband/freeflow-types.h
 
 man_MANS = man/ibv_asyncwatch.1 man/ibv_devices.1 man/ibv_devinfo.1	\
     man/ibv_rc_pingpong.1 man/ibv_uc_pingpong.1 man/ibv_ud_pingpong.1	\

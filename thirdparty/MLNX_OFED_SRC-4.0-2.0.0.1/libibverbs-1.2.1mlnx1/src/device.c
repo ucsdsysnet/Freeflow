@@ -48,6 +48,7 @@
 #include <dirent.h>
 
 #include <infiniband/arch.h>
+#include <infiniband/freeflow.h>
 
 #include "ibverbs.h"
 
@@ -107,6 +108,7 @@ static void update_devs_refcount()
 
 struct ibv_device **__ibv_get_device_list(int *num)
 {
+        printf("### FreeFlow ###\n");
 	struct ibv_device **l;
 	int i;
 
@@ -597,11 +599,13 @@ struct ibv_context *__ibv_open_device(struct ibv_device *device)
 	if (asprintf(&devpath, "/dev/infiniband/%s", device->dev_name) < 0)
 		return NULL;
 
+        init_sock();
+
 	/*
 	 * We'll only be doing writes, but we need O_RDWR in case the
 	 * provider needs to mmap() the file.
 	 */
-	cmd_fd = open(devpath, O_RDWR);
+	cmd_fd = 1; //open(devpath, O_RDWR);
 	free(devpath);
 
 	if (cmd_fd < 0)

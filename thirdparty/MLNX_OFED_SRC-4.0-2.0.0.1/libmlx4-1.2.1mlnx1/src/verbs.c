@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2007 Cisco, Inc.  All rights reserved.
+ * Copyright (c) Microsoft Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -735,7 +736,11 @@ static struct ibv_cq *create_cq(struct ibv_context *context,
 	cqe = align_queue_size(cqe + 1);
 
 	if (mlx4_alloc_cq_buf(to_mctx(context), &cq->buf, cqe, mctx->cqe_size))
+	{
+		printf("cq->buf=%x\n", cq->buf);
+		fflush(stdout);
 		goto err;
+	}
 
 	cq->cqe_size = mctx->cqe_size;
 	cq->set_ci_db  = mlx4_alloc_db(to_mctx(context), MLX4_DB_TYPE_CQ);
@@ -754,7 +759,7 @@ static struct ibv_cq *create_cq(struct ibv_context *context,
 		cmd.buf_addr = (uintptr_t) cq->buf.buf;
 		cmd.db_addr  = (uintptr_t) cq->set_ci_db;
 	}
-	if (NULL != attr) {
+	if (0){//NULL != attr) {
 		ret = ibv_exp_cmd_create_cq(context, cqe - 1, channel,
 					    comp_vector, &cq->ibv_cq,
 					    &cmd_e.ibv_cmd,
@@ -1240,12 +1245,13 @@ int mlx4_destroy_qp(struct ibv_qp *ibqp)
 		}
 	}
 
+	// [TODO]
 	if (qp->rq.wqe_cnt)
 		mlx4_free_db(to_mctx(ibqp->context), MLX4_DB_TYPE_RQ, qp->db);
 
 	mlx4_dealloc_qp_buf(ibqp->context, qp);
 
-	free(qp);
+        free(qp);
 
 	return 0;
 }
@@ -1301,30 +1307,19 @@ struct ibv_ah *mlx4_create_ah_common(struct ibv_pd *pd,
 
 struct ibv_ah *mlx4_create_ah(struct ibv_pd *pd, struct ibv_ah_attr *attr)
 {
-	struct ibv_ah *ah;
-	struct ibv_exp_port_attr port_attr;
-	struct ibv_port_attr port_attr_legacy;
-	uint8_t			link_layer;
+	struct ibv_ah *ah = malloc(sizeof(struct ibv_ah));
+	if (!ah)
+		return NULL;
+	memset(ah, 0, sizeof(struct ibv_ah));
 
-	port_attr.comp_mask = IBV_EXP_QUERY_PORT_ATTR_MASK1;
-	port_attr.mask1 = IBV_EXP_QUERY_PORT_LINK_LAYER;
-
-	if (ibv_exp_query_port(pd->context, attr->port_num, &port_attr)) {
-		if (ibv_query_port(pd->context, attr->port_num, &port_attr_legacy))
-			return NULL;
-
-		link_layer = port_attr_legacy.link_layer;
-	} else {
-		link_layer = port_attr.link_layer;
-	}
-
-	ah = mlx4_create_ah_common(pd, attr, link_layer);
-
+        struct ibv_create_ah_resp resp;
+	ibv_cmd_create_ah(pd, ah, attr, &resp, sizeof resp);
 	return ah;
 }
 
 int mlx4_destroy_ah(struct ibv_ah *ah)
 {
+	ibv_cmd_destroy_ah(ah);
 	free(to_mah(ah));
 
 	return 0;

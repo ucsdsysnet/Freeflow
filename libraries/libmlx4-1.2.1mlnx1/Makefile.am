@@ -1,4 +1,4 @@
-AM_CFLAGS = -g -Wall -Werror -D_GNU_SOURCE
+AM_CFLAGS = -g -D_GNU_SOURCE #-Wall -Werror
 
 mlx4_version_script = @MLX4_VERSION_SCRIPT@
 

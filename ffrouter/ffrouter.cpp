@@ -212,13 +212,8 @@ FreeFlowRouter::FreeFlowRouter(const char* name) {
         LOG_DEBUG("RDMA Dev: dev.name=" << this->rdma_data.ib_device->name << ", " <<  "dev.dev_name=" << this->rdma_data.ib_device->dev_name);    
     }
 
-    this->vip_map["10.47.0.4"] = "192.168.2.13";
-    this->vip_map["10.47.0.6"] = "192.168.2.13";
-    this->vip_map["10.47.0.7"] = "192.168.2.13";
-    this->vip_map["10.47.0.8"] = "192.168.2.13";
-    this->vip_map["10.44.0.3"] = "192.168.2.15";
-    this->vip_map["10.44.0.4"] = "192.168.2.15";
-    this->vip_map["10.44.0.6"] = "192.168.2.15";
+    this->vip_map["192.168.192.0"] = "10.5.0.1";
+    this->vip_map["192.168.0.1"] = "10.6.0.1";
 }
 
 void FreeFlowRouter::start()

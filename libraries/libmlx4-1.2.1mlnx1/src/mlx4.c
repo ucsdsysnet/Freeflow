@@ -109,6 +109,7 @@ struct {
 	HCA(MELLANOX, 0x100e),	/* MT27551 Family */
 	HCA(MELLANOX, 0x100f),	/* MT27560 Family */
 	HCA(MELLANOX, 0x1010),	/* MT27561 Family */
+	HCA(MELLANOX, 0x1017),  /* MT27800 Family */
 };
 
 static struct ibv_context_ops mlx4_ctx_ops = {
@@ -745,8 +746,11 @@ static struct verbs_device *mlx4_driver_init(const char *uverbs_sys_path,
 	return NULL;
 
 found:
-	if (abi_version < MLX4_UVERBS_MIN_ABI_VERSION ||
-	    abi_version > MLX4_UVERBS_MAX_ABI_VERSION) {
+	// To be able to use it with MLX5 devices
+#define MLX5_IB_UVERBS_ABI_VERSION 1
+	if (abi_version != MLX5_IB_UVERBS_ABI_VERSION &&
+		(abi_version < MLX4_UVERBS_MIN_ABI_VERSION ||
+	    abi_version > MLX4_UVERBS_MAX_ABI_VERSION)) {
 		fprintf(stderr, PFX "Fatal: ABI version %d of %s is not supported "
 			"(min supported %d, max supported %d)\n",
 			abi_version, uverbs_sys_path,

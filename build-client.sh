@@ -1,12 +1,16 @@
+#!/bin/bash
+
+PARALLEL=10
+
 cd libraries/libmlx4-1.2.1mlnx1/
-make
+make -j $PARALLEL
 make install
 
 cd ../libibverbs-1.2.1mlnx1/
-make
+make -j $PARALLEL
 make install
 
 cd ../librdmacm-1.1.0mlnx/
-make
+make -j $PARALLEL
 make install
 

@@ -457,7 +457,7 @@ void rdma_destroy_event_channel(struct rdma_event_channel *channel)
 	req.ec.fd = event_channel_map[channel->fd];
 	struct CM_DESTROY_EVENT_CHANNEL_RSP rsp;
         int rsp_size;
-        request_router(CM_CREATE_EVENT_CHANNEL, &req, &rsp, &rsp_size);
+        request_router(CM_DESTROY_EVENT_CHANNEL, &req, &rsp, &rsp_size);
 
 	//close(channel->fd);
 	free(channel);
